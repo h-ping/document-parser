@@ -6,8 +6,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
+
+from document_parser.consistency_cli import ConsistencyPipelineError, _ensure_ocr_token_for_real_ocr
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +27,37 @@ class PublicCliTests(unittest.TestCase):
         self.assertIn("--output-dir", completed.stdout)
         self.assertNotIn("--standard-manifest", completed.stdout)
         self.assertNotIn(".pdf", completed.stdout)
+
+    def test_interactive_ocr_token_sets_current_process_env(self) -> None:
+        original_key = os.environ.pop("PPOCRV6_API_KEY", None)
+        original_token = os.environ.pop("PPOCRV6_TOKEN", None)
+        try:
+            with patch("sys.stdin.isatty", return_value=True), patch("getpass.getpass", return_value="token-123"):
+                _ensure_ocr_token_for_real_ocr(None)
+
+            self.assertEqual(os.environ["PPOCRV6_API_KEY"], "token-123")
+        finally:
+            os.environ.pop("PPOCRV6_API_KEY", None)
+            if original_key is not None:
+                os.environ["PPOCRV6_API_KEY"] = original_key
+            if original_token is not None:
+                os.environ["PPOCRV6_TOKEN"] = original_token
+
+    def test_missing_ocr_token_in_non_interactive_mode_fails_before_real_ocr(self) -> None:
+        original_key = os.environ.pop("PPOCRV6_API_KEY", None)
+        original_token = os.environ.pop("PPOCRV6_TOKEN", None)
+        try:
+            with patch("sys.stdin.isatty", return_value=False):
+                with self.assertRaises(ConsistencyPipelineError) as context:
+                    _ensure_ocr_token_for_real_ocr(None)
+
+            self.assertEqual(context.exception.error_type, "MissingOcrTokenError")
+            self.assertIn("缺少 OCR token", str(context.exception))
+        finally:
+            if original_key is not None:
+                os.environ["PPOCRV6_API_KEY"] = original_key
+            if original_token is not None:
+                os.environ["PPOCRV6_TOKEN"] = original_token
 
     def test_cli_generates_report_with_offline_ocr_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

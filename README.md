@@ -18,7 +18,7 @@ check-package-consistency --help
 
 ## 环境变量
 
-真实识别包装图文字时需要配置 PP-OCRv6 密钥：
+真实识别包装图文字时需要 PP-OCRv6 密钥。推荐用环境变量配置：
 
 ```bash
 PPOCRV6_API_KEY=...
@@ -30,6 +30,14 @@ PPOCRV6_API_KEY=...
 PPOCRV6_API_URL=...
 PPOCRV6_MODEL=PP-OCRv6
 ```
+
+如果没有提前设置 `PPOCRV6_API_KEY`，运行真实 OCR 时命令会提示输入：
+
+```text
+请输入 PPOCRV6_API_KEY（输入不会显示，且只在本次运行中使用）：
+```
+
+交互式输入的 token 只写入当前进程环境，不会保存到文件，也不会写入报告目录。
 
 ## 使用
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import getpass
 import json
+import os
 import sys
 import time
 import uuid
@@ -150,6 +152,7 @@ def run_consistency_report(
     summary["stages"]["package_image_comparison"] = _stage_running(output_dir, comparison_started_at)
     write_json(output_dir / "pipeline_summary.json", summary)
     try:
+        _ensure_ocr_token_for_real_ocr(ocr_fixture_path)
         comparison_result = run_compare_package_image(
             standard_dir=standard_dir,
             image_path=image_path,
@@ -223,6 +226,23 @@ def _read_quality_report(standard_dir: Path) -> dict[str, Any]:
 
 def _standard_quality_allows_downstream(report: dict[str, Any]) -> bool:
     return report.get("status") == "pass" and report.get("downstream_allowed") is True
+
+
+def _ensure_ocr_token_for_real_ocr(ocr_fixture_path: Path | None) -> None:
+    if ocr_fixture_path:
+        return
+    if os.getenv("PPOCRV6_API_KEY") or os.getenv("PPOCRV6_TOKEN"):
+        return
+    if not sys.stdin.isatty():
+        raise ConsistencyPipelineError(
+            "package_image_comparison",
+            "缺少 OCR token。请设置 PPOCRV6_API_KEY 环境变量，或在交互式终端运行后按提示输入。",
+            "MissingOcrTokenError",
+        )
+    token = getpass.getpass("请输入 PPOCRV6_API_KEY（输入不会显示，且只在本次运行中使用）：").strip()
+    if not token:
+        raise ConsistencyPipelineError("package_image_comparison", "未输入 OCR token，已停止包装图文字识别。", "MissingOcrTokenError")
+    os.environ["PPOCRV6_API_KEY"] = token
 
 
 def _base_summary(
