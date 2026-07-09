@@ -64,6 +64,50 @@ PPOCRV6_MODEL=PP-OCRv6
 
 交互式输入的 token 只写入当前进程环境，不会保存到文件，也不会写入报告目录。
 
+## 发布到腾讯云 COS
+
+如果需要把 HTML 报告发给外部用户访问，可以在运行时增加 `--publish-cos`。发布前需要配置腾讯云 COS 信息，推荐放在本机配置文件或平台密钥管理中，不要写进命令行、代码仓库或报告目录。
+
+默认会读取：
+
+```text
+~/.config/packaging-consistency-check/secrets.env
+```
+
+需要配置这些 key：
+
+```bash
+PACKAGING_COS_SECRET_ID=...
+PACKAGING_COS_SECRET_KEY=...
+PACKAGING_COS_BUCKET_URL=...?bucket=your-bucket&region=ap-guangzhou
+PACKAGING_COS_CDN_DOMAIN=https://your-cdn-domain
+```
+
+也可以直接通过同名环境变量提供。运行发布：
+
+```bash
+check-package-consistency \
+  --standard path/to/standard.xlsx \
+  --image path/to/package.jpg \
+  --output-dir out/package_consistency_report \
+  --publish-cos
+```
+
+发布成功后，公开链接会写入 `pipeline_summary.json` 的 `publish.public_url` 和 `key_artifacts.published_report_html`。发布阶段只上传脱敏后的公开报告包，不上传本机绝对路径、COS 密钥或 OCR token。
+
+测试发布包但不实际上传：
+
+```bash
+check-package-consistency \
+  --standard path/to/standard.xlsx \
+  --image path/to/package.jpg \
+  --output-dir out/package_consistency_report \
+  --publish-cos \
+  --cos-dry-run
+```
+
+如果需要使用非默认配置文件，可以传 `--cos-config path/to/secrets.env`。
+
 ## 使用
 
 ```bash

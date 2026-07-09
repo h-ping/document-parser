@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ConfigError
+from .cos_publish import CosPublishError, load_local_runtime_env, publish_report_to_cos
 from .image_compare import ImageCompareError, SUPPORTED_IMAGE_SUFFIXES
 from .image_compare_cli import run_compare_package_image
 from .standard_xlsx import ParseError as StandardXlsxParseError
@@ -32,6 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--image", required=True, type=Path, help="包装设计图路径，支持 PNG/JPG/JPEG。")
     parser.add_argument("--output-dir", required=True, type=Path, help="报告输出目录。")
     parser.add_argument("--ocr-fixture", type=Path, help="可选，包装图文字识别离线测试结果。")
+    parser.add_argument("--publish-cos", action="store_true", help="将客户报告发布到腾讯云 COS，并在 summary 中写入公开链接。")
+    parser.add_argument("--cos-key-prefix", help="可选，COS 对象前缀模板，支持 {run_id} 和 {timestamp}。")
+    parser.add_argument("--cos-dry-run", action="store_true", help="只生成公开发布包，不实际上传 COS。")
+    parser.add_argument("--cos-config", type=Path, help="可选，COS 本机配置文件路径，默认 ~/.config/packaging-consistency-check/secrets.env。")
     args = parser.parse_args(argv)
 
     try:
@@ -40,10 +45,15 @@ def main(argv: list[str] | None = None) -> int:
             image_path=args.image,
             output_dir=args.output_dir,
             ocr_fixture_path=args.ocr_fixture,
+            publish_cos=args.publish_cos,
+            cos_key_prefix=args.cos_key_prefix,
+            cos_dry_run=args.cos_dry_run,
+            cos_config_path=args.cos_config,
         )
     except (
         ConfigError,
         ConsistencyPipelineError,
+        CosPublishError,
         ImageCompareError,
         StandardXlsxParseError,
         OSError,
@@ -68,6 +78,10 @@ def run_consistency_report(
     image_path: Path,
     output_dir: Path,
     ocr_fixture_path: Path | None = None,
+    publish_cos: bool = False,
+    cos_key_prefix: str | None = None,
+    cos_dry_run: bool = False,
+    cos_config_path: Path | None = None,
 ) -> dict[str, Any]:
     pipeline_started_at = _utc_now()
     pipeline_started_monotonic = time.perf_counter()
@@ -77,6 +91,8 @@ def run_consistency_report(
     _assert_standard_template_xlsx(standard_path)
     image_path = _existing_path(image_path, "package_image_comparison")
     ocr_fixture_path = _existing_path(ocr_fixture_path, "package_image_comparison") if ocr_fixture_path else None
+    cos_config_path = cos_config_path.expanduser().resolve() if cos_config_path else None
+    load_local_runtime_env(cos_config_path)
     if image_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
         raise ConsistencyPipelineError("package_image_comparison", f"不支持的包装设计图格式：{image_path.suffix or '<none>'}", "ImageCompareError")
 
@@ -190,7 +206,42 @@ def run_consistency_report(
             }
         },
     )
+    if publish_cos:
+        publish_started_at = _utc_now()
+        publish_started_monotonic = time.perf_counter()
+        summary["stages"]["publish"] = _stage_running(output_dir / "artifacts" / "06_publish", publish_started_at)
+        write_json(output_dir / "pipeline_summary.json", summary)
+        try:
+            publish_result = publish_report_to_cos(
+                output_dir=output_dir,
+                run_id=str(summary["run_id"]),
+                key_prefix_template=cos_key_prefix,
+                dry_run=cos_dry_run,
+                config_path=cos_config_path,
+            )
+        except CosPublishError as exc:
+            summary = _with_stage_failure(
+                summary,
+                "publish",
+                "CosPublishError",
+                str(exc),
+                started_at=publish_started_at,
+                duration_seconds=_elapsed_seconds(publish_started_monotonic),
+            )
+            summary = _complete_summary(summary, pipeline_started_monotonic)
+            write_json(output_dir / "pipeline_summary.json", summary)
+            _write_artifact_index(output_dir)
+            raise ConsistencyPipelineError("publish", str(exc), "CosPublishError") from exc
+        summary["publish"] = publish_result
+        summary["stages"]["publish"] = _stage_success(
+            artifacts_dir=output_dir / "artifacts" / "06_publish",
+            started_at=publish_started_at,
+            duration_seconds=_elapsed_seconds(publish_started_monotonic),
+            extra={"publish": {"status": publish_result.get("status"), "public_url": publish_result.get("public_url"), "dry_run": publish_result.get("dry_run")}},
+        )
     summary["key_artifacts"] = _key_artifacts(output_dir)
+    if isinstance(summary.get("publish"), dict) and summary["publish"].get("public_url"):
+        summary["key_artifacts"]["published_report_html"] = summary["publish"].get("public_url")
     summary = _complete_summary(summary, pipeline_started_monotonic)
     write_json(output_dir / "pipeline_summary.json", summary)
     _write_artifact_index(output_dir)
@@ -273,6 +324,7 @@ def _base_summary(
         "stages": {
             "standard_structure": {"status": "not_started", "artifacts_dir": str(output_dir / "standard_structure")},
             "package_image_comparison": {"status": "not_started", "artifacts_dir": str(output_dir)},
+            "publish": {"status": "not_started", "artifacts_dir": str(output_dir / "artifacts" / "06_publish")},
         },
         "key_artifacts": _key_artifacts(output_dir),
     }
@@ -405,6 +457,10 @@ def _failure_summary(args: argparse.Namespace, stage: str, error_type: str, reas
             "package_image_comparison": {
                 "status": "failed" if stage == "package_image_comparison" else "not_started",
                 **({"error_type": error_type, "reason": reason} if stage == "package_image_comparison" else {}),
+            },
+            "publish": {
+                "status": "failed" if stage == "publish" else "not_started",
+                **({"error_type": error_type, "reason": reason} if stage == "publish" else {}),
             },
         },
         "key_artifacts": _key_artifacts(output_dir),

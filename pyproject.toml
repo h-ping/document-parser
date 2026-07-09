@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "openpyxl>=3.1.5",
   "requests>=2.31.0",
+  "cos-python-sdk-v5>=1.9.30",
 ]
 
 [project.optional-dependencies]

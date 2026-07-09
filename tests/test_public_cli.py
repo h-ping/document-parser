@@ -25,6 +25,8 @@ class PublicCliTests(unittest.TestCase):
         self.assertIn("--standard", completed.stdout)
         self.assertIn("--image", completed.stdout)
         self.assertIn("--output-dir", completed.stdout)
+        self.assertIn("--publish-cos", completed.stdout)
+        self.assertIn("--cos-dry-run", completed.stdout)
         self.assertNotIn("--standard-manifest", completed.stdout)
         self.assertNotIn(".pdf", completed.stdout)
 
@@ -98,10 +100,61 @@ class PublicCliTests(unittest.TestCase):
             self.assertEqual(summary["stages"]["standard_structure"]["status"], "pass")
             self.assertEqual(summary["stages"]["package_image_comparison"]["status"], "pass")
 
+    def test_cli_can_build_cos_dry_run_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            standard_path = temp_path / "standard.xlsx"
+            image_path = temp_path / "package.png"
+            ocr_fixture_path = temp_path / "ocr.json"
+            output_dir = temp_path / "report"
+            _write_standard_xlsx_fixture(standard_path)
+            image_path.write_bytes(base64.b64decode(_BLANK_PNG_BASE64))
+            _write_ocr_fixture(ocr_fixture_path)
 
-def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+            completed = _run_cli(
+                "--standard",
+                str(standard_path),
+                "--image",
+                str(image_path),
+                "--ocr-fixture",
+                str(ocr_fixture_path),
+                "--output-dir",
+                str(output_dir),
+                "--publish-cos",
+                "--cos-dry-run",
+                "--cos-key-prefix",
+                "test/{run_id}",
+                env_overrides=_fake_cos_env(),
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((output_dir / "artifacts/06_publish/cos_upload_result.json").exists())
+            self.assertTrue((output_dir / "artifacts/06_publish/public_bundle/result_preview.html").exists())
+            self.assertTrue(any((output_dir / "artifacts/06_publish/public_bundle").glob("package_image.*")))
+            summary = json.loads((output_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
+            public_summary_text = (output_dir / "artifacts/06_publish/public_bundle/pipeline_summary.public.json").read_text(encoding="utf-8")
+            self.assertEqual(summary["stages"]["publish"]["status"], "pass")
+            self.assertEqual(summary["publish"]["status"], "success")
+            self.assertTrue(summary["publish"]["dry_run"])
+            self.assertIn("https://cdn.example.test/test/pkg_consistency_", summary["key_artifacts"]["published_report_html"])
+            self.assertNotIn(str(temp_path), public_summary_text)
+            self.assertNotIn("fake-secret", public_summary_text)
+
+
+def _fake_cos_env() -> dict[str, str]:
+    return {
+        "PACKAGING_COS_SECRET_ID": "fake-id",
+        "PACKAGING_COS_SECRET_KEY": "fake-secret",
+        "PACKAGING_COS_BUCKET_URL": "https://cos.example.test?bucket=test-bucket&region=ap-guangzhou",
+        "PACKAGING_COS_CDN_DOMAIN": "https://cdn.example.test",
+    }
+
+
+def _run_cli(*args: str, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env.pop("PPOCRV6_API_KEY", None)
+    if env_overrides:
+        env.update(env_overrides)
     env["PYTHONPATH"] = os.pathsep.join(part for part in (str(ROOT / "src"), env.get("PYTHONPATH", "")) if part)
     return subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "check_package_consistency.py"), *args],
