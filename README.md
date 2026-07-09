@@ -6,7 +6,11 @@
 
 ## 安装
 
+推荐方式是先从 GitHub 下载代码，再在项目目录安装：
+
 ```bash
+git clone https://github.com/h-ping/document-parser.git
+cd document-parser
 python3 -m pip install -e .
 ```
 
@@ -15,6 +19,14 @@ python3 -m pip install -e .
 ```bash
 check-package-consistency --help
 ```
+
+如果不需要保留源码目录，也可以直接从 GitHub 安装：
+
+```bash
+python3 -m pip install git+https://github.com/h-ping/document-parser.git
+```
+
+如果安装后提示 `check-package-consistency: command not found`，通常是当前 Python 环境的 `bin` 目录没有加入 `PATH`。建议先激活对应虚拟环境，或使用同一个 Python 环境重新安装。
 
 ## 环境变量
 
