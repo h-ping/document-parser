@@ -11,12 +11,12 @@ FINAL_RESULT_SCHEMA_ARTIFACT = "schemas/final_result.schema.json"
 
 
 def write_schema_artifacts(output_dir: Path) -> None:
-    schema = json.loads(_source_schema_path().read_text(encoding="utf-8"))
+    schema = json.loads(_source_schema_text())
     write_json(output_dir / FINAL_RESULT_SCHEMA_ARTIFACT, schema)
 
 
-def _source_schema_path() -> Path:
+def _source_schema_text() -> str:
     package_schema = resources.files("document_parser").joinpath("resources/final_result.schema.json")
     if package_schema.is_file():
-        return Path(str(package_schema))
-    return Path(__file__).resolve().parents[2] / FINAL_RESULT_SCHEMA_ARTIFACT
+        return package_schema.read_text(encoding="utf-8")
+    return (Path(__file__).resolve().parents[2] / FINAL_RESULT_SCHEMA_ARTIFACT).read_text(encoding="utf-8")

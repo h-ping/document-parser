@@ -34,6 +34,13 @@ python3 -m pip install git+https://github.com/h-ping/document-parser.git
 
 如果安装后提示 `check-package-consistency: command not found`，通常是当前 Python 环境的 `bin` 目录没有加入 `PATH`。建议先激活对应虚拟环境，或使用同一个 Python 环境重新安装。
 
+如果运行时报 `schemas/final_result.schema.json` 找不到，通常是安装到了旧版本或命中了 pip 缓存。请强制重装最新 GitHub 版本：
+
+```bash
+python3 -m pip install --upgrade --force-reinstall --no-cache-dir \
+  git+https://github.com/h-ping/document-parser.git
+```
+
 ## 环境变量
 
 真实识别包装图文字时需要 PP-OCRv6 密钥。推荐用环境变量配置：
