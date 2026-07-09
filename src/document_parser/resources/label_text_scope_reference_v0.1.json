@@ -1,0 +1,142 @@
+{
+  "reference_version": "label_text_scope_reference_v0.1",
+  "source_template": {
+    "file_name": "包装标签文字内容录入模板_v0.7.docx",
+    "scope_rule": "只采集最终会印在包装上的标签文字内容。"
+  },
+  "scope_policy": {
+    "primary_rule": "Only final printed packaging label text can become extracted_data.",
+    "primary_rule_zh": "只抽取最终印在包装上的标签文字。",
+    "reference_is_not_evidence": true,
+    "template_placeholders_are_not_values": true,
+    "non_template_printed_text_policy": "keep_as_other_label_text_or_unknown_scope"
+  },
+  "in_scope_categories": [
+    {
+      "category_id": "main_label_text",
+      "display_name": "标签主文字",
+      "description": "产品主标签上最终印刷的字段文字。"
+    },
+    {
+      "category_id": "business_operator_label_text",
+      "display_name": "企业/生产相关文字",
+      "description": "委托方、生产者、经销商等最终印刷的企业信息。"
+    },
+    {
+      "category_id": "nutrition_label_text",
+      "display_name": "营养成分表文字",
+      "description": "营养表标题、行列、脚注和适用范围。"
+    },
+    {
+      "category_id": "content_item_label_text",
+      "display_name": "多内容物/组合装标签文字",
+      "description": "礼盒、组合装、多口味内容物相关最终印刷文字。"
+    },
+    {
+      "category_id": "barcode_and_mark_label_text",
+      "display_name": "条码/标识文字",
+      "description": "条码数字、回收、储运、认证等包装标识文字。"
+    },
+    {
+      "category_id": "other_printed_label_text",
+      "display_name": "其它包装印刷文字",
+      "description": "模板未覆盖但看起来会最终印在包装上的标签文字。"
+    }
+  ],
+  "out_of_scope_categories": [
+    {
+      "category_id": "template_instruction",
+      "display_name": "模板填写说明",
+      "description": "模板自身的填写范围、默认规则、示例、说明文字。"
+    },
+    {
+      "category_id": "template_placeholder",
+      "display_name": "模板占位文字",
+      "description": "填写、示例等模板占位内容，不能作为 PDF 最终值。"
+    },
+    {
+      "category_id": "artwork_technical_note",
+      "display_name": "制稿/工艺/版面说明",
+      "description": "刀模、出血、套印、色值、印刷工艺、制稿等非标签文字。"
+    },
+    {
+      "category_id": "review_or_revision_note",
+      "display_name": "审稿/修订/内部备注",
+      "description": "审稿意见、修改记录、版本记录、内部备注。"
+    },
+    {
+      "category_id": "document_metadata",
+      "display_name": "文档元信息",
+      "description": "文件名、页码、导出信息、系统生成信息。"
+    },
+    {
+      "category_id": "ocr_noise",
+      "display_name": "OCR 噪音",
+      "description": "低置信孤立字符、断裂符号、无法解释的碎片。"
+    }
+  ],
+  "field_catalog": [
+    {"semantic_key": "product.name", "display_name": "产品名称/品名", "category_id": "main_label_text", "aliases": ["产品名称", "品名", "名称"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.brand_text", "display_name": "商标/品牌文字", "category_id": "main_label_text", "aliases": ["商标", "品牌", "品牌文字"], "criticality": "non_critical", "field_type": "string"},
+    {"semantic_key": "product.net_content", "display_name": "净含量/规格", "category_id": "main_label_text", "aliases": ["净含量", "规格"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.product_type", "display_name": "产品类型/类别", "category_id": "main_label_text", "aliases": ["产品类型", "产品类别", "类别"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.ingredients", "display_name": "配料", "category_id": "main_label_text", "aliases": ["配料", "配料表", "成分"], "criticality": "critical", "field_type": "long_text"},
+    {"semantic_key": "custom.allergen_statement", "display_name": "致敏物质提示", "category_id": "main_label_text", "aliases": ["致敏物质", "过敏原", "过敏提示"], "criticality": "non_critical", "field_type": "long_text"},
+    {"semantic_key": "product.storage_condition", "display_name": "贮存条件", "category_id": "main_label_text", "aliases": ["贮存条件", "储存条件", "保存条件"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.shelf_life", "display_name": "保质期", "category_id": "main_label_text", "aliases": ["保质期"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.production_date_mark", "display_name": "生产日期/批号标示语", "category_id": "main_label_text", "aliases": ["生产日期", "批号", "见包装喷码处"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "custom.usage_instruction", "display_name": "食用/冲调方法", "category_id": "main_label_text", "aliases": ["食用方法", "冲调方法", "饮用方法"], "criticality": "non_critical", "field_type": "long_text"},
+    {"semantic_key": "custom.warning_statement", "display_name": "警示语/注意事项", "category_id": "main_label_text", "aliases": ["警示语", "注意事项", "温馨提示"], "criticality": "non_critical", "field_type": "long_text"},
+    {"semantic_key": "custom.marketing_claims", "display_name": "宣传语/卖点", "category_id": "main_label_text", "aliases": ["宣传语", "卖点"], "criticality": "non_critical", "field_type": "long_text"},
+    {"semantic_key": "product.standard_code", "display_name": "产品标准号", "category_id": "main_label_text", "aliases": ["产品标准号", "产品标准代号", "执行标准", "产品执行标准"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "product.quality_grade", "display_name": "质量等级", "category_id": "main_label_text", "aliases": ["质量等级", "等级"], "criticality": "non_critical", "field_type": "string"},
+    {"semantic_key": "manufacturer.origin", "display_name": "产地", "category_id": "main_label_text", "aliases": ["产地"], "criticality": "critical", "field_type": "string"},
+    {"semantic_key": "barcode.commodity", "display_name": "商品条码数字", "category_id": "barcode_and_mark_label_text", "aliases": ["商品条码", "条码"], "criticality": "critical", "field_type": "barcode"},
+    {"semantic_key": "barcode.outer_case", "display_name": "外箱条码数字", "category_id": "barcode_and_mark_label_text", "aliases": ["外箱条码"], "criticality": "critical", "field_type": "barcode"},
+    {"semantic_key": "custom.mark_text", "display_name": "标识文字", "category_id": "barcode_and_mark_label_text", "aliases": ["标识文字", "回收", "储运", "认证"], "criticality": "non_critical", "field_type": "long_text"}
+  ],
+  "entity_catalog": [
+    {
+      "entity_type": "business_operator",
+      "display_name": "企业/生产经营者",
+      "category_id": "business_operator_label_text",
+      "repeatable": true,
+      "roles": ["委托方", "受委托方/生产者", "经销商/进口商"],
+      "fields": ["企业名称原文", "地址原文", "邮政编码", "许可证/备案号", "网站", "联系方式"]
+    },
+    {
+      "entity_type": "content_item",
+      "display_name": "内容物",
+      "category_id": "content_item_label_text",
+      "repeatable": true,
+      "fields": ["内容物编号", "内容物名称", "净含量/数量", "产品分类", "对应营养表编号", "配料原文", "备注"]
+    }
+  ],
+  "table_catalog": [
+    {
+      "table_type": "nutrition_facts",
+      "display_name": "营养成分表",
+      "category_id": "nutrition_label_text",
+      "repeatable": true,
+      "columns": ["营养项目", "每100g/mL含量", "NRV%", "备注"],
+      "canonical_rows": ["能量", "蛋白质", "脂肪", "碳水化合物", "钠", "糖", "膳食纤维", "其它营养成分"]
+    },
+    {
+      "table_type": "nutrition_table_inventory",
+      "display_name": "营养表清单",
+      "category_id": "nutrition_label_text",
+      "repeatable": true,
+      "columns": ["营养表编号", "对应产品/内容物", "表名/适用范围", "底部备注/脚注原文"]
+    },
+    {
+      "table_type": "content_items",
+      "display_name": "多内容物/组合装标签文字",
+      "category_id": "content_item_label_text",
+      "repeatable": true,
+      "columns": ["内容物编号", "内容物名称", "净含量/数量", "产品分类", "对应营养表编号", "配料原文", "备注"]
+    }
+  ],
+  "placeholder_tokens": ["填写", "示例"],
+  "hard_noise_keywords": ["制稿", "刀模", "出血", "套印", "印刷工艺", "色值", "CMYK", "PANTONE", "审稿", "校对", "版本记录", "修改记录", "修订记录", "内部备注", "仅供制稿", "不印刷"],
+  "unknown_scope_keywords": ["待确认", "不确定", "暂定"]
+}

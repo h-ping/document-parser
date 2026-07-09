@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document-parser"
+version = "0.1.0"
+description = "Packaging label text consistency report CLI for standard Excel templates."
+requires-python = ">=3.11"
+dependencies = [
+  "openpyxl>=3.1.5",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+barcode = ["zxing-cpp>=2.3.0"]
+
+[project.scripts]
+check-package-consistency = "document_parser.consistency_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+document_parser = ["resources/*.json"]
