@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/document-parser/final_result.schema.json",
+  "title": "Packaging label standard structured parser final result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "job",
+    "document",
+    "generated_schema",
+    "extracted_data",
+    "evidence",
+    "cross_validation",
+    "coverage",
+    "validation",
+    "quality",
+    "risks",
+    "review_tasks",
+    "metadata"
+  ],
+  "properties": {
+    "job": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["job_id", "job_type", "status"],
+      "properties": {
+        "job_id": {"type": "string", "minLength": 1},
+        "job_type": {
+          "enum": ["standard_pdf_to_structured_json", "standard_xlsx_to_structured_json"]
+        },
+        "status": {"enum": ["queued", "running", "completed", "completed_with_warnings", "failed"]}
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["file_name", "file_hash", "page_count", "page_sizes", "parse_status"],
+      "properties": {
+        "file_name": {"type": ["string", "null"]},
+        "file_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "page_count": {"type": "integer", "minimum": 0},
+        "page_sizes": {"type": "array"},
+        "detected_document_types": {"type": "array"},
+        "language": {"type": "array"},
+        "parse_status": {"enum": ["completed", "completed_with_warnings", "failed", "partial_failed"]},
+        "pdf_text_layer_available": {"type": "boolean"},
+        "page_image_status": {"type": "string"},
+        "warnings": {"type": "array"}
+      }
+    },
+    "generated_schema": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema_id", "auto_generated", "schema_version", "sections", "entity_types", "field_definitions"],
+      "properties": {
+        "schema_id": {"type": "string"},
+        "auto_generated": {"type": "boolean"},
+        "schema_version": {"type": "string"},
+        "sections": {"type": "array"},
+        "entity_types": {"type": "array"},
+        "field_definitions": {"type": "array"},
+        "table_definitions": {"type": "array"},
+        "requirement_definitions": {"type": "array"}
+      }
+    },
+    "extracted_data": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["sections", "regions", "entities", "fields", "missing_fields", "missing_tables", "tables", "requirements", "revision_blocks"],
+      "properties": {
+        "sections": {"type": "array"},
+        "regions": {"type": "array"},
+        "entities": {"type": "array"},
+        "fields": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/field"}
+        },
+        "missing_fields": {"type": "array"},
+        "missing_tables": {"type": "array"},
+        "tables": {"type": "array"},
+        "requirements": {"type": "array"},
+        "revision_blocks": {"type": "array"}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "cross_validation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["checks"],
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/validation_check"}
+        },
+        "source_consistency": {"type": "object"}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "validation": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/validation_check"}
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["overall_status", "critical_confidence_threshold", "auto_ingest_allowed"],
+      "properties": {
+        "overall_status": {"type": "string"},
+        "critical_confidence_threshold": {"type": "number"},
+        "field_completion_rate": {"type": "number"},
+        "critical_field_pass_rate": {"type": "number"},
+        "high_risk_count": {"type": "integer"},
+        "medium_risk_count": {"type": "integer"},
+        "low_risk_count": {"type": "integer"},
+        "auto_ingest_allowed": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]}
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/risk"}
+    },
+    "review_tasks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/review_task"}
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["parser_version", "pipeline_version", "no_guessing", "json_export", "created_at"],
+      "properties": {
+        "parser_version": {"type": "string"},
+        "pipeline_version": {"type": "string"},
+        "schema_mode": {"type": "string"},
+        "no_guessing": {"const": true},
+        "json_export": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["schema_version", "media_type", "encoding", "root_keys", "contract_checks", "no_guessing", "schema_artifact"],
+          "properties": {
+            "schema_version": {"const": "mvp_final_json_v0.1"},
+            "media_type": {"const": "application/json"},
+            "encoding": {"const": "utf-8"},
+            "root_keys": {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "contract_checks": {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "no_guessing": {"const": true},
+            "primary_artifact": {"type": ["string", "null"]},
+            "contract_artifact": {"type": ["string", "null"]},
+            "schema_artifact": {"const": "schemas/final_result.schema.json"}
+          }
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["stage", "reason", "error_type"],
+          "properties": {
+            "stage": {"type": "string"},
+            "reason": {"type": "string"},
+            "error_type": {"type": "string"},
+            "recoverable": {"type": "boolean"}
+          }
+        },
+        "created_at": {"type": "string"}
+      }
+    }
+  },
+  "$defs": {
+    "bbox_pdf": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["x", "y", "width", "height", "page_width", "page_height", "unit", "origin"],
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "width": {"type": "number"},
+        "height": {"type": "number"},
+        "page_width": {"type": "number"},
+        "page_height": {"type": "number"},
+        "unit": {"const": "pt"},
+        "origin": {"const": "top_left"}
+      }
+    },
+    "bbox_normalized": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["x1", "y1", "x2", "y2"],
+      "properties": {
+        "x1": {"type": "number", "minimum": 0, "maximum": 1},
+        "y1": {"type": "number", "minimum": 0, "maximum": 1},
+        "x2": {"type": "number", "minimum": 0, "maximum": 1},
+        "y2": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "field_id",
+        "semantic_key",
+        "display_name",
+        "field_type",
+        "raw_value",
+        "clean_value",
+        "normalized_value",
+        "value_hash",
+        "status",
+        "criticality",
+        "confidence",
+        "risk_level",
+        "review_required",
+        "evidence_refs"
+      ],
+      "properties": {
+        "field_id": {"type": "string"},
+        "semantic_key": {"type": "string"},
+        "display_name": {"type": "string"},
+        "field_type": {"type": "string"},
+        "raw_value": {"type": "string"},
+        "clean_value": {"type": "string"},
+        "normalized_value": {"type": "string"},
+        "value_hash": {"type": "string"},
+        "status": {"type": "string"},
+        "criticality": {"type": "string"},
+        "confidence": {"type": "object"},
+        "risk_level": {"enum": ["high", "medium", "low", "info"]},
+        "review_required": {"type": "boolean"},
+        "section_id": {"type": ["string", "null"]},
+        "entity_id": {"type": ["string", "null"]},
+        "table_id": {"type": ["string", "null"]},
+        "row_key": {"type": ["string", "null"]},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["evidence_id", "source_text", "page", "extraction_methods", "bbox_status", "source_node_ids"],
+      "properties": {
+        "evidence_id": {"type": "string"},
+        "source_text": {"type": "string"},
+        "page": {"type": "integer", "minimum": 1},
+        "extraction_methods": {"type": "array", "items": {"type": "string"}},
+        "bbox_status": {"enum": ["available", "missing"]},
+        "source_node_ids": {"type": "array", "items": {"type": "string"}},
+        "bbox_pdf": {"oneOf": [{"$ref": "#/$defs/bbox_pdf"}, {"type": "null"}]},
+        "bbox_normalized": {"oneOf": [{"$ref": "#/$defs/bbox_normalized"}, {"type": "null"}]}
+      }
+    },
+    "validation_check": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["check_type", "result"],
+      "properties": {
+        "validation_id": {"type": "string"},
+        "check_type": {"type": "string"},
+        "result": {"enum": ["passed", "failed", "skipped"]},
+        "severity": {"enum": ["high", "medium", "low", "info"]}
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["risk_id", "target_type", "target_id", "risk_level", "risk_type", "message", "evidence_refs"],
+      "properties": {
+        "risk_id": {"type": "string"},
+        "target_type": {
+          "enum": [
+            "document",
+            "generated_schema",
+            "field",
+            "entity",
+            "table",
+            "region",
+            "requirement",
+            "missing_field",
+            "missing_table",
+            "revision_block",
+            "table_parser",
+            "source_layer",
+            "source_consistency"
+          ]
+        },
+        "target_id": {"type": "string"},
+        "risk_level": {"enum": ["high", "medium", "low", "info"]},
+        "risk_type": {"type": "string"},
+        "message": {"type": "string"},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "review_task": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["task_id", "target_type", "target_id", "risk_level", "reason", "required", "evidence_refs"],
+      "properties": {
+        "task_id": {"type": "string"},
+        "target_type": {
+          "enum": [
+            "document",
+            "generated_schema",
+            "field",
+            "entity",
+            "table",
+            "region",
+            "requirement",
+            "missing_field",
+            "missing_table",
+            "revision_block",
+            "table_parser",
+            "source_layer",
+            "source_consistency"
+          ]
+        },
+        "target_id": {"type": "string"},
+        "risk_level": {"enum": ["high", "medium", "low", "info"]},
+        "reason": {"type": "string"},
+        "required": {"type": "boolean"},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
