@@ -6,6 +6,12 @@
 
 ## 安装
 
+需要 Python 3.11 或更高版本。先确认当前 Python 版本：
+
+```bash
+python3 --version
+```
+
 推荐方式是先从 GitHub 下载代码，再在项目目录安装：
 
 ```bash
