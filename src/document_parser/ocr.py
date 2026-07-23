@@ -3,13 +3,17 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
 try:
     from zai import ZhipuAiClient
+    from zai.core import ZaiError
 except ImportError:
     ZhipuAiClient = None
+    class ZaiError(Exception):
+        pass
 
 from .config import RuntimeConfig
 from .models import BBoxNormalized, BBoxPdf, OcrLine, PageInfo
@@ -28,6 +32,30 @@ class OcrClient:
         raise NotImplementedError
 
 
+def _file_to_data_uri(path: Path) -> str:
+    mime_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".pdf": "application/pdf",
+    }
+    mime_type = mime_types.get(path.suffix.lower())
+    if mime_type is None:
+        raise OcrError("GLM-OCR only supports PDF, JPG, JPEG, and PNG files.")
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{payload}"
+
+
+def _glm_error_is_retryable(exc: ZaiError) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    message = str(exc)
+    if status_code in {401, 403} or '"1214"' in message or 'code":"1214"' in message:
+        return False
+    if status_code is None:
+        return True
+    return status_code in {400, 408, 409, 425, 429, 500, 502, 503, 504}
+
+
 class GLMOcrClient(OcrClient):
     def __init__(self, config: RuntimeConfig, timeout_seconds: int = 180) -> None:
         self._api_key = config.glm_ocr_api_key
@@ -44,14 +72,26 @@ class GLMOcrClient(OcrClient):
         if ZhipuAiClient is None:
             raise OcrError("GLM-OCR requires the zai-sdk package.")
         client = ZhipuAiClient(api_key=self._api_key)
-        response = client.layout_parsing.create(
-            model=self._model,
-            file=base64.b64encode(path.read_bytes()).decode("ascii"),
-            return_crop_images=False,
-            need_layout_visualization=False,
-            timeout=self._timeout_seconds,
-        )
-        return _response_to_dict(response)
+        payload = _file_to_data_uri(path)
+        last_error: ZaiError | None = None
+        for attempt_index in range(3):
+            try:
+                response = client.layout_parsing.create(
+                    model=self._model,
+                    file=payload,
+                    return_crop_images=False,
+                    need_layout_visualization=False,
+                    timeout=self._timeout_seconds,
+                )
+                return _response_to_dict(response)
+            except ZaiError as exc:
+                last_error = exc
+                if attempt_index == 2 or not _glm_error_is_retryable(exc):
+                    break
+                time.sleep(1.5 * (attempt_index + 1))
+        if last_error is not None:
+            raise OcrError(f"GLM-OCR request failed: {last_error}") from last_error
+        raise OcrError("GLM-OCR request failed without an SDK response.")
 
 
 class RecordedOcrClient(OcrClient):
