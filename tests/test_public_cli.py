@@ -31,35 +31,41 @@ class PublicCliTests(unittest.TestCase):
         self.assertNotIn(".pdf", completed.stdout)
 
     def test_interactive_ocr_token_sets_current_process_env(self) -> None:
-        original_key = os.environ.pop("PPOCRV6_API_KEY", None)
-        original_token = os.environ.pop("PPOCRV6_TOKEN", None)
+        original_key = os.environ.pop("GLM_OCR_API_KEY", None)
+        original_zai = os.environ.pop("ZAI_API_KEY", None)
+        original_zhipu = os.environ.pop("ZHIPUAI_API_KEY", None)
         try:
             with patch("sys.stdin.isatty", return_value=True), patch("getpass.getpass", return_value="token-123"):
                 _ensure_ocr_token_for_real_ocr(None)
 
-            self.assertEqual(os.environ["PPOCRV6_API_KEY"], "token-123")
+            self.assertEqual(os.environ["GLM_OCR_API_KEY"], "token-123")
         finally:
-            os.environ.pop("PPOCRV6_API_KEY", None)
+            os.environ.pop("GLM_OCR_API_KEY", None)
             if original_key is not None:
-                os.environ["PPOCRV6_API_KEY"] = original_key
-            if original_token is not None:
-                os.environ["PPOCRV6_TOKEN"] = original_token
+                os.environ["GLM_OCR_API_KEY"] = original_key
+            if original_zai is not None:
+                os.environ["ZAI_API_KEY"] = original_zai
+            if original_zhipu is not None:
+                os.environ["ZHIPUAI_API_KEY"] = original_zhipu
 
     def test_missing_ocr_token_in_non_interactive_mode_fails_before_real_ocr(self) -> None:
-        original_key = os.environ.pop("PPOCRV6_API_KEY", None)
-        original_token = os.environ.pop("PPOCRV6_TOKEN", None)
+        original_key = os.environ.pop("GLM_OCR_API_KEY", None)
+        original_zai = os.environ.pop("ZAI_API_KEY", None)
+        original_zhipu = os.environ.pop("ZHIPUAI_API_KEY", None)
         try:
             with patch("sys.stdin.isatty", return_value=False):
                 with self.assertRaises(ConsistencyPipelineError) as context:
                     _ensure_ocr_token_for_real_ocr(None)
 
             self.assertEqual(context.exception.error_type, "MissingOcrTokenError")
-            self.assertIn("缺少 OCR token", str(context.exception))
+            self.assertIn("缺少 GLM-OCR token", str(context.exception))
         finally:
             if original_key is not None:
-                os.environ["PPOCRV6_API_KEY"] = original_key
-            if original_token is not None:
-                os.environ["PPOCRV6_TOKEN"] = original_token
+                os.environ["GLM_OCR_API_KEY"] = original_key
+            if original_zai is not None:
+                os.environ["ZAI_API_KEY"] = original_zai
+            if original_zhipu is not None:
+                os.environ["ZHIPUAI_API_KEY"] = original_zhipu
 
     def test_cli_generates_report_with_offline_ocr_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -152,7 +158,9 @@ def _fake_cos_env() -> dict[str, str]:
 
 def _run_cli(*args: str, env_overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
-    env.pop("PPOCRV6_API_KEY", None)
+    env.pop("GLM_OCR_API_KEY", None)
+    env.pop("ZAI_API_KEY", None)
+    env.pop("ZHIPUAI_API_KEY", None)
     if env_overrides:
         env.update(env_overrides)
     env["PYTHONPATH"] = os.pathsep.join(part for part in (str(ROOT / "src"), env.get("PYTHONPATH", "")) if part)

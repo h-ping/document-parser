@@ -11,6 +11,7 @@ dependencies = [
   "openpyxl>=3.1.5",
   "requests>=2.31.0",
   "cos-python-sdk-v5>=1.9.30",
+  "zai-sdk>=0.2.3",
 ]
 
 [project.optional-dependencies]

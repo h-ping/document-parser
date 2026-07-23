@@ -43,23 +43,22 @@ python3 -m pip install --upgrade --force-reinstall --no-cache-dir \
 
 ## 环境变量
 
-真实识别包装图文字时需要 PP-OCRv6 密钥。推荐用环境变量配置：
+真实识别包装图文字时需要 GLM-OCR 密钥。推荐用环境变量配置：
 
 ```bash
-PPOCRV6_API_KEY=...
+GLM_OCR_API_KEY=...
 ```
 
-也兼容 `PPOCRV6_TOKEN`。如供应商地址或模型名变更，可选配置：
+也兼容 `ZAI_API_KEY`、`ZHIPUAI_API_KEY`。如模型名变更，可选配置：
 
 ```bash
-PPOCRV6_API_URL=...
-PPOCRV6_MODEL=PP-OCRv6
+GLM_OCR_MODEL=glm-ocr
 ```
 
-如果没有提前设置 `PPOCRV6_API_KEY`，运行真实 OCR 时命令会提示输入：
+如果没有提前设置 `GLM_OCR_API_KEY`，运行真实 OCR 时命令会提示输入：
 
 ```text
-请输入 PPOCRV6_API_KEY（输入不会显示，且只在本次运行中使用）：
+请输入 GLM_OCR_API_KEY（输入不会显示，且只在本次运行中使用）：
 ```
 
 交互式输入的 token 只写入当前进程环境，不会保存到文件，也不会写入报告目录。

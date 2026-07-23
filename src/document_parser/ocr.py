@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
 import json
-import time
+import re
 from pathlib import Path
 from typing import Any
 
-import requests
+try:
+    from zai import ZhipuAiClient
+except ImportError:
+    ZhipuAiClient = None
 
 from .config import RuntimeConfig
 from .models import BBoxNormalized, BBoxPdf, OcrLine, PageInfo
@@ -24,71 +28,30 @@ class OcrClient:
         raise NotImplementedError
 
 
-class PPOCRV6OcrClient(OcrClient):
-    def __init__(self, config: RuntimeConfig, timeout_seconds: int = 180, poll_interval_seconds: float = 5.0) -> None:
-        self._api_key = config.ppocrv6_api_key
-        self._api_url = config.ppocrv6_api_url
-        self._model = config.ppocrv6_model
+class GLMOcrClient(OcrClient):
+    def __init__(self, config: RuntimeConfig, timeout_seconds: int = 180) -> None:
+        self._api_key = config.glm_ocr_api_key
+        self._model = config.glm_ocr_model
         self._timeout_seconds = timeout_seconds
-        self._poll_interval_seconds = poll_interval_seconds
 
     def recognize_pdf(self, pdf_path: Path, pages: list[PageInfo]) -> list[OcrLine]:
-        return normalize_ppocrv6_jsonl(self._recognize_file(pdf_path), pages)
+        return normalize_glm_ocr_response(self._recognize_file(pdf_path), pages)
 
     def recognize_image(self, image_path: Path, page: PageInfo) -> list[OcrLine]:
-        return normalize_ppocrv6_jsonl(self._recognize_file(image_path), [page])
+        return normalize_glm_ocr_response(self._recognize_file(image_path), [page])
 
-    def _recognize_file(self, path: Path) -> str:
-        headers = {
-            "Authorization": f"bearer {self._api_key}",
-        }
-        optional_payload = {
-            "useDocOrientationClassify": False,
-            "useDocUnwarping": False,
-            "useTextlineOrientation": False,
-        }
-        data = {
-            "model": self._model,
-            "optionalPayload": json.dumps(optional_payload),
-        }
-        with path.open("rb") as handle:
-            response = requests.post(
-                self._api_url,
-                headers=headers,
-                data=data,
-                files={"file": handle},
-                timeout=self._timeout_seconds,
-            )
-        if response.status_code != 200:
-            raise OcrError(f"PPOCRV6 job submission failed with HTTP {response.status_code}")
-
-        job_id = _job_id_from_response(response.json())
-        result_url = self._poll_job(job_id, headers)
-        jsonl_response = requests.get(result_url, timeout=self._timeout_seconds)
-        if jsonl_response.status_code != 200:
-            raise OcrError(f"PPOCRV6 result download failed with HTTP {jsonl_response.status_code}")
-        return jsonl_response.text
-
-    def _poll_job(self, job_id: str, headers: dict[str, str]) -> str:
-        deadline = time.monotonic() + self._timeout_seconds
-        while time.monotonic() < deadline:
-            response = requests.get(f"{self._api_url}/{job_id}", headers=headers, timeout=self._timeout_seconds)
-            if response.status_code != 200:
-                raise OcrError(f"PPOCRV6 job polling failed with HTTP {response.status_code}")
-            body = response.json()
-            data = body.get("data") or {}
-            state = data.get("state")
-            if state == "done":
-                result_url = ((data.get("resultUrl") or {}).get("jsonUrl"))
-                if not result_url:
-                    raise OcrError("PPOCRV6 job completed without jsonUrl result.")
-                return str(result_url)
-            if state == "failed":
-                raise OcrError(f"PPOCRV6 job failed: {data.get('errorMsg', 'unknown error')}")
-            if state not in {"pending", "running"}:
-                raise OcrError(f"PPOCRV6 job returned unexpected state: {state}")
-            time.sleep(self._poll_interval_seconds)
-        raise OcrError("PPOCRV6 job polling timed out.")
+    def _recognize_file(self, path: Path) -> dict[str, Any]:
+        if ZhipuAiClient is None:
+            raise OcrError("GLM-OCR requires the zai-sdk package.")
+        client = ZhipuAiClient(api_key=self._api_key)
+        response = client.layout_parsing.create(
+            model=self._model,
+            file=base64.b64encode(path.read_bytes()).decode("ascii"),
+            return_crop_images=False,
+            need_layout_visualization=False,
+            timeout=self._timeout_seconds,
+        )
+        return _response_to_dict(response)
 
 
 class RecordedOcrClient(OcrClient):
@@ -104,6 +67,52 @@ class RecordedOcrClient(OcrClient):
         del image_path
         body = json.loads(self._fixture_path.read_text(encoding="utf-8"))
         return normalize_ppocrv6_any_response(body, [page])
+
+
+def normalize_glm_ocr_response(body: dict[str, Any], pages: list[PageInfo]) -> list[OcrLine]:
+    layout_pages = _glm_layout_pages(body)
+    data_pages = _as_list(_as_dict(body.get("data_info")).get("pages"))
+    lines: list[OcrLine] = []
+
+    for page_zero_index, raw_page_details in enumerate(layout_pages):
+        page_info = pages[min(page_zero_index, len(pages) - 1)] if pages else PageInfo(page=page_zero_index + 1, width=1, height=1)
+        page_details = [detail for detail in _as_list(raw_page_details) if isinstance(detail, dict)]
+        data_page = _as_dict(data_pages[page_zero_index]) if page_zero_index < len(data_pages) else {}
+        page_line_index = 0
+        for detail_index, detail in enumerate(page_details, start=1):
+            detail_lines = _glm_detail_text_lines(str(detail.get("content") or ""))
+            if not detail_lines:
+                continue
+            source_width = _first_float(detail, ["width"]) or _first_float(data_page, ["width"]) or page_info.width
+            source_height = _first_float(detail, ["height"]) or _first_float(data_page, ["height"]) or page_info.height
+            bbox_pdf, bbox_normalized = _glm_bbox(detail, page_info, source_width, source_height)
+            block_id = stable_id(f"ocr_p{page_info.page}_block", detail_index)
+            for text in detail_lines:
+                page_line_index += 1
+                lines.append(
+                    OcrLine(
+                        ocr_line_id=stable_id(f"ocr_p{page_info.page}", page_line_index),
+                        page=page_info.page,
+                        text=text,
+                        confidence=1.0,
+                        bbox_pdf=bbox_pdf,
+                        bbox_normalized=bbox_normalized,
+                        block_id=block_id,
+                        tokens=[],
+                        metadata={
+                            "provider": "glm_ocr",
+                            "line_index": page_line_index,
+                            "detail_index": detail_index,
+                            "detail_label": detail.get("label"),
+                            "block_id": block_id,
+                            "source_size": {
+                                "width": source_width,
+                                "height": source_height,
+                            },
+                        },
+                    )
+                )
+    return lines
 
 
 def normalize_ppocrv6_any_response(body: dict[str, Any], pages: list[PageInfo]) -> list[OcrLine]:
@@ -186,12 +195,79 @@ def normalize_ppocrv6_jsonl(text: str, pages: list[PageInfo]) -> list[OcrLine]:
     return normalize_ppocrv6_response({"result": {"ocrResults": ocr_results}}, pages)
 
 
-def _job_id_from_response(body: dict[str, Any]) -> str:
-    data = body.get("data") or {}
-    job_id = data.get("jobId")
-    if not job_id:
-        raise OcrError("PPOCRV6 job submission response did not include data.jobId.")
-    return str(job_id)
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        value = response.model_dump()
+        if isinstance(value, dict):
+            return value
+    if hasattr(response, "to_dict"):
+        value = response.to_dict()
+        if isinstance(value, dict):
+            return value
+    if hasattr(response, "dict"):
+        value = response.dict()
+        if isinstance(value, dict):
+            return value
+    raise OcrError("GLM-OCR response could not be converted to a JSON object.")
+
+
+def _glm_layout_pages(body: dict[str, Any]) -> list[Any]:
+    layout_details = body.get("layout_details")
+    if not isinstance(layout_details, list):
+        return []
+    if layout_details and isinstance(layout_details[0], dict):
+        return [layout_details]
+    return layout_details
+
+
+def _glm_detail_text_lines(content: str) -> list[str]:
+    lines = []
+    for raw_line in content.splitlines():
+        text = raw_line.strip()
+        if not text:
+            continue
+        if _is_markdown_separator_row(text):
+            continue
+        lines.append(_markdown_table_row_text(text))
+    return lines or ([content.strip()] if content.strip() else [])
+
+
+def _is_markdown_separator_row(text: str) -> bool:
+    return bool(re.fullmatch(r"\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?", text))
+
+
+def _markdown_table_row_text(text: str) -> str:
+    if not text.startswith("|") or "|" not in text.strip("|"):
+        return text
+    cells = [cell.strip() for cell in text.strip("|").split("|") if cell.strip()]
+    return " ".join(cells) if cells else text
+
+
+def _glm_bbox(
+    detail: dict[str, Any],
+    page_info: PageInfo,
+    source_width: float | None,
+    source_height: float | None,
+) -> tuple[BBoxPdf | None, BBoxNormalized | None]:
+    bbox = detail.get("bbox_2d")
+    if not isinstance(bbox, list) or len(bbox) != 4 or not all(isinstance(item, (int, float)) for item in bbox):
+        return None, None
+    x1, y1, x2, y2 = [float(item) for item in bbox]
+    points = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+    bbox_pdf, bbox_normalized = _bbox_from_points(points, page_info, source_width, source_height)
+    if bbox_pdf.width <= 0 or bbox_pdf.height <= 0:
+        return None, None
+    return bbox_pdf, bbox_normalized
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _first_list(data: dict[str, Any], keys: list[str]) -> Any:

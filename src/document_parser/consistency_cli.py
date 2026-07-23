@@ -282,18 +282,18 @@ def _standard_quality_allows_downstream(report: dict[str, Any]) -> bool:
 def _ensure_ocr_token_for_real_ocr(ocr_fixture_path: Path | None) -> None:
     if ocr_fixture_path:
         return
-    if os.getenv("PPOCRV6_API_KEY") or os.getenv("PPOCRV6_TOKEN"):
+    if os.getenv("GLM_OCR_API_KEY") or os.getenv("ZAI_API_KEY") or os.getenv("ZHIPUAI_API_KEY"):
         return
     if not sys.stdin.isatty():
         raise ConsistencyPipelineError(
             "package_image_comparison",
-            "缺少 OCR token。请设置 PPOCRV6_API_KEY 环境变量，或在交互式终端运行后按提示输入。",
+            "缺少 GLM-OCR token。请设置 GLM_OCR_API_KEY 环境变量，或在交互式终端运行后按提示输入。",
             "MissingOcrTokenError",
         )
-    token = getpass.getpass("请输入 PPOCRV6_API_KEY（输入不会显示，且只在本次运行中使用）：").strip()
+    token = getpass.getpass("请输入 GLM_OCR_API_KEY（输入不会显示，且只在本次运行中使用）：").strip()
     if not token:
         raise ConsistencyPipelineError("package_image_comparison", "未输入 OCR token，已停止包装图文字识别。", "MissingOcrTokenError")
-    os.environ["PPOCRV6_API_KEY"] = token
+    os.environ["GLM_OCR_API_KEY"] = token
 
 
 def _base_summary(

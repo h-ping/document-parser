@@ -20,7 +20,9 @@ COS_ENV_KEYS = {
     "PACKAGING_COS_SECRET_KEY",
     "PACKAGING_COS_BUCKET_URL",
     "PACKAGING_COS_CDN_DOMAIN",
-    "PPOCRV6_TOKEN",
+    "GLM_OCR_API_KEY",
+    "ZAI_API_KEY",
+    "ZHIPUAI_API_KEY",
 }
 SECRET_KEY_PARTS = ("secret", "token", "password", "authorization")
 PATH_KEY_PARTS = ("path", "dir", "file")
@@ -308,8 +310,9 @@ def _bundle_sensitive_path_offenders(bundle_dir: Path) -> list[str]:
         "SecretId",
         "SecretKey",
         "PACKAGING_COS_SECRET",
-        "PPOCRV6_API_KEY",
-        "PPOCRV6_TOKEN",
+        "GLM_OCR_API_KEY",
+        "ZAI_API_KEY",
+        "ZHIPUAI_API_KEY",
     )
     for path in bundle_dir.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in {".html", ".json", ".txt", ".csv"}:

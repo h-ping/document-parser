@@ -98,7 +98,7 @@ def build_source_layers(
                 "warnings": list(getattr(perception, "warnings", [])),
             },
             "ocr": {
-                "provider": "ppocrv6",
+                "provider": "glm_ocr",
                 "status": "failed" if ocr_error else "pass",
                 "error": ocr_error,
                 "fallback_used": bool(ocr_error and pdf_text_available),

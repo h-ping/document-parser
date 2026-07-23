@@ -19,7 +19,7 @@ from .image_compare import (
 )
 from .image_compare_html import write_image_compare_html
 from .models import PageInfo, to_jsonable
-from .ocr import PPOCRV6OcrClient, RecordedOcrClient
+from .ocr import GLMOcrClient, RecordedOcrClient
 from .utils import sha256_file, write_json
 
 
@@ -77,9 +77,9 @@ def run_compare_package_image(
         ocr_mode = "recorded_fixture"
     else:
         ocr_page_width, ocr_page_height = input_image_width, input_image_height
-        config = RuntimeConfig.from_env(require_secrets=True, required_env_vars=["PPOCRV6_API_KEY"])
-        ocr_client = PPOCRV6OcrClient(config)
-        ocr_mode = "ppocrv6"
+        config = RuntimeConfig.from_env(require_secrets=True, required_env_vars=["GLM_OCR_API_KEY"])
+        ocr_client = GLMOcrClient(config)
+        ocr_mode = "glm_ocr"
     page = PageInfo(page=1, width=ocr_page_width, height=ocr_page_height)
     ocr_lines = ocr_client.recognize_image(image_path, page)
     ocr_quality_report = build_ocr_quality_report(
