@@ -315,13 +315,19 @@ def normalize_ppocrv6_jsonl(text: str, pages: list[PageInfo]) -> list[OcrLine]:
 
 
 def _download_ppocrv6_jsonl(url: str) -> dict[str, Any]:
-    try:
-        response = requests.get(url, timeout=120)
-    except requests.RequestException as exc:
-        raise OcrError(f"PP-OCRv6 result download failed: {exc.__class__.__name__}") from exc
-    if response.status_code != 200:
-        raise OcrError(f"PP-OCRv6 result download failed with HTTP {response.status_code}")
-    return _ppocrv6_jsonl_to_response(response.content.decode("utf-8"))
+    for attempt_index in range(3):
+        try:
+            response = requests.get(url, timeout=120)
+        except requests.RequestException as exc:
+            if attempt_index == 2:
+                raise OcrError(f"PP-OCRv6 result download failed: {exc.__class__.__name__}") from exc
+        else:
+            if response.status_code == 200:
+                return _ppocrv6_jsonl_to_response(response.content.decode("utf-8"))
+            if attempt_index == 2:
+                raise OcrError(f"PP-OCRv6 result download failed with HTTP {response.status_code}")
+        time.sleep(1.5 * (2**attempt_index))
+    raise OcrError("PP-OCRv6 result download failed without an HTTP response.")
 
 
 def _ppocrv6_jsonl_to_response(text: str) -> dict[str, Any]:

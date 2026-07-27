@@ -202,6 +202,62 @@ class PPOCRV6NormalizeTests(unittest.TestCase):
         self.assertEqual(requests_calls[1]["url"], "https://pp.example.test/jobs/job-1")
         self.assertEqual(requests_calls[2]["url"], "https://result.example.test/ocr.jsonl")
 
+    def test_ppocrv6_result_download_retries_transient_failures(self) -> None:
+        calls = []
+        sleeps = []
+        original_get = ocr_module.requests.get
+        original_sleep = ocr_module.time.sleep
+
+        class Response:
+            def __init__(self, status_code: int, content: bytes = b"") -> None:
+                self.status_code = status_code
+                self.content = content
+
+        def fake_get(url, timeout):
+            calls.append({"url": url, "timeout": timeout})
+            if len(calls) == 1:
+                raise ocr_module.requests.Timeout("temporary timeout")
+            if len(calls) == 2:
+                return Response(503)
+            jsonl = b'{"result":{"ocrResults":[{"prunedResult":{"rec_texts":["product name"]}}]}}\n'
+            return Response(200, jsonl)
+
+        try:
+            ocr_module.requests.get = fake_get
+            ocr_module.time.sleep = sleeps.append
+
+            result = ocr_module._download_ppocrv6_jsonl("https://result.example.test/ocr.jsonl")
+        finally:
+            ocr_module.requests.get = original_get
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1.5, 3.0])
+        self.assertEqual(result["result"]["ocrResults"][0]["prunedResult"]["rec_texts"], ["product name"])
+
+    def test_ppocrv6_result_download_raises_after_three_failures(self) -> None:
+        calls = []
+        sleeps = []
+        original_get = ocr_module.requests.get
+        original_sleep = ocr_module.time.sleep
+
+        def fake_get(url, timeout):
+            calls.append({"url": url, "timeout": timeout})
+            raise ocr_module.requests.ConnectionError("connection reset")
+
+        try:
+            ocr_module.requests.get = fake_get
+            ocr_module.time.sleep = sleeps.append
+
+            with self.assertRaisesRegex(ocr_module.OcrError, "PP-OCRv6 result download failed: ConnectionError"):
+                ocr_module._download_ppocrv6_jsonl("https://result.example.test/ocr.jsonl")
+        finally:
+            ocr_module.requests.get = original_get
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1.5, 3.0])
+
     def test_normalizes_common_ppocrv6_fields(self) -> None:
         response = {
             "result": {
