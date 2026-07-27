@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/document-parser/input_manifest.schema.json",
+  "title": "Document structure extraction input manifest",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "input_pdf": {
+      "type": "string"
+    },
+    "input_xlsx": {
+      "type": "string"
+    },
+    "input_path": {
+      "type": "string"
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "quality_gate": {
+      "type": "string",
+      "enum": ["strict"],
+      "default": "strict"
+    },
+    "layout_mode": {
+      "type": "string",
+      "enum": ["legacy", "char_atoms_high_recall"],
+      "default": "legacy"
+    },
+    "extraction_mode": {
+      "type": "string",
+      "enum": ["agent_plus_rule", "rule_only"],
+      "default": "agent_plus_rule"
+    },
+    "ocr_mode": {
+      "type": "string",
+      "enum": ["glm_ocr"],
+      "default": "glm_ocr"
+    },
+    "ocr_fixture_path": {
+      "type": "string"
+    },
+    "agent_items_path": {
+      "type": "string",
+      "description": "Optional offline span-grounded agent candidate JSON. The runner validates and merges these candidates without calling an online LLM."
+    },
+    "use_llm_agent": {
+      "type": "boolean",
+      "default": false
+    },
+    "llm_mode": {
+      "type": "string",
+      "enum": ["disabled", "agent"],
+      "default": "disabled"
+    },
+    "llm_agent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "items_path": {
+          "type": "string"
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "items_path": {
+          "type": "string"
+        }
+      }
+    },
+    "repair_mode": {
+      "type": "string",
+      "enum": ["execute_plan", "plan_only"],
+      "default": "execute_plan"
+    },
+    "block_downstream_on_quality_failure": {
+      "type": ["boolean", "string"],
+      "default": true
+    },
+    "cloud_ocr_consent": {
+      "type": ["boolean", "string"],
+      "default": true
+    },
+    "allow_scanned_pdf": {
+      "type": ["boolean", "string"],
+      "default": true
+    },
+    "require_table_quality_pass": {
+      "type": ["boolean", "string"],
+      "default": true
+    },
+    "max_repair_rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 2
+    },
+    "table_parser_mode": {
+      "type": "string",
+      "enum": ["validate_only", "feed_structure"],
+      "default": "validate_only"
+    }
+  },
+  "anyOf": [
+    {
+      "required": ["input_pdf"]
+    },
+    {
+      "required": ["input_xlsx"]
+    },
+    {
+      "required": ["input_path"]
+    },
+    {
+      "required": ["document"]
+    },
+    {
+      "required": ["input"]
+    },
+    {
+      "required": ["inputs"]
+    }
+  ]
+}

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import time
 from pathlib import Path
 from typing import Any
+
+import requests
 
 try:
     from zai import ZhipuAiClient
@@ -18,6 +21,13 @@ except ImportError:
 from .config import RuntimeConfig
 from .models import BBoxNormalized, BBoxPdf, OcrLine, PageInfo
 from .utils import stable_id
+
+
+PPOCRV6_OPTIONAL_PAYLOAD: dict[str, Any] = {
+    "useDocOrientationClassify": False,
+    "useDocUnwarping": False,
+    "useTextlineOrientation": True,
+}
 
 
 class OcrError(RuntimeError):
@@ -94,6 +104,70 @@ class GLMOcrClient(OcrClient):
         raise OcrError("GLM-OCR request failed without an SDK response.")
 
 
+class PPOCRV6Client(OcrClient):
+    def __init__(self, config: RuntimeConfig, timeout_seconds: int = 900, poll_interval_seconds: float = 5.0) -> None:
+        self._api_key = config.ppocrv6_api_key
+        self._job_url = config.ppocrv6_job_url
+        self._model = config.ppocrv6_model
+        self._timeout_seconds = timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+
+    def recognize_pdf(self, pdf_path: Path, pages: list[PageInfo]) -> list[OcrLine]:
+        return normalize_ppocrv6_any_response(self._recognize_file(pdf_path), pages)
+
+    def recognize_image(self, image_path: Path, page: PageInfo) -> list[OcrLine]:
+        return normalize_ppocrv6_any_response(self._recognize_file(image_path), [page])
+
+    def _recognize_file(self, path: Path) -> dict[str, Any]:
+        if not self._api_key:
+            raise OcrError("PP-OCRv6 requires PPOCRV6_API_KEY or PPOCRV6_TOKEN.")
+        if not path.exists():
+            raise OcrError(f"PP-OCRv6 input file does not exist: {path}")
+        headers = {"Authorization": f"bearer {self._api_key}"}
+        try:
+            with path.open("rb") as handle:
+                response = requests.post(
+                    self._job_url,
+                    headers=headers,
+                    data={"model": self._model, "optionalPayload": json.dumps(PPOCRV6_OPTIONAL_PAYLOAD, ensure_ascii=False)},
+                    files={"file": handle},
+                    timeout=120,
+                )
+        except requests.RequestException as exc:
+            raise OcrError(f"PP-OCRv6 job submit failed: {exc.__class__.__name__}") from exc
+        if response.status_code != 200:
+            raise OcrError(f"PP-OCRv6 job submit failed with HTTP {response.status_code}")
+        job_id = str(_as_dict(_as_dict(response.json()).get("data")).get("jobId") or "")
+        if not job_id:
+            raise OcrError("PP-OCRv6 job submit response did not include data.jobId.")
+        return self._poll_result(job_id)
+
+    def _poll_result(self, job_id: str) -> dict[str, Any]:
+        started = time.monotonic()
+        headers = {"Authorization": f"bearer {self._api_key}"}
+        while True:
+            if time.monotonic() - started > self._timeout_seconds:
+                raise OcrError(f"PP-OCRv6 job timed out: {job_id}")
+            try:
+                response = requests.get(f"{self._job_url}/{job_id}", headers=headers, timeout=60)
+            except requests.RequestException as exc:
+                raise OcrError(f"PP-OCRv6 job polling failed: {exc.__class__.__name__}") from exc
+            if response.status_code != 200:
+                raise OcrError(f"PP-OCRv6 job polling failed with HTTP {response.status_code}")
+            data = _as_dict(_as_dict(response.json()).get("data"))
+            state = str(data.get("state") or "")
+            if state == "done":
+                json_url = str(_as_dict(data.get("resultUrl")).get("jsonUrl") or "")
+                if not json_url:
+                    raise OcrError(f"PP-OCRv6 job completed without resultUrl.jsonUrl: {job_id}")
+                return _download_ppocrv6_jsonl(json_url)
+            if state == "failed":
+                raise OcrError(f"PP-OCRv6 job failed: {data.get('errorMsg') or job_id}")
+            if state not in {"pending", "running"}:
+                raise OcrError(f"PP-OCRv6 job returned unknown state {state!r}: {job_id}")
+            time.sleep(self._poll_interval_seconds)
+
+
 class RecordedOcrClient(OcrClient):
     def __init__(self, fixture_path: Path) -> None:
         self._fixture_path = fixture_path
@@ -156,6 +230,8 @@ def normalize_glm_ocr_response(body: dict[str, Any], pages: list[PageInfo]) -> l
 
 
 def normalize_ppocrv6_any_response(body: dict[str, Any], pages: list[PageInfo]) -> list[OcrLine]:
+    if isinstance(body.get("layout_details"), list):
+        return normalize_glm_ocr_response(body, pages)
     if isinstance(body.get("result"), dict):
         return normalize_ppocrv6_response(body, pages)
     if isinstance(body.get("ocrResults"), list):
@@ -176,6 +252,8 @@ def normalize_ppocrv6_response(body: dict[str, Any], pages: list[PageInfo]) -> l
         texts = _first_list(pruned, ["rec_texts", "recTexts", "texts", "text"])
         scores = _first_list(pruned, ["rec_scores", "recScores", "scores", "confidences"])
         boxes = _first_list(pruned, ["dt_polys", "dt_polygons", "rec_polys", "boxes", "polys"])
+        if source_width is None or source_height is None:
+            source_width, source_height = _infer_source_size(boxes, page_info)
 
         if isinstance(texts, str):
             texts = [texts]
@@ -205,10 +283,11 @@ def normalize_ppocrv6_response(body: dict[str, Any], pages: list[PageInfo]) -> l
                     bbox_normalized=bbox_normalized,
                     block_id=block_id,
                     tokens=_tokens_for_line(pruned, text_index, len(texts), page_info, source_width, source_height),
-                    metadata={
-                        "line_index": text_index + 1,
-                        "block_id": block_id,
-                        "source_size": {
+                        metadata={
+                            "provider": "ppocrv6",
+                            "line_index": text_index + 1,
+                            "block_id": block_id,
+                            "source_size": {
                             "width": source_width,
                             "height": source_height,
                         },
@@ -233,6 +312,32 @@ def normalize_ppocrv6_jsonl(text: str, pages: list[PageInfo]) -> list[OcrLine]:
         if isinstance(line_results, list):
             ocr_results.extend(line_results)
     return normalize_ppocrv6_response({"result": {"ocrResults": ocr_results}}, pages)
+
+
+def _download_ppocrv6_jsonl(url: str) -> dict[str, Any]:
+    try:
+        response = requests.get(url, timeout=120)
+    except requests.RequestException as exc:
+        raise OcrError(f"PP-OCRv6 result download failed: {exc.__class__.__name__}") from exc
+    if response.status_code != 200:
+        raise OcrError(f"PP-OCRv6 result download failed with HTTP {response.status_code}")
+    return _ppocrv6_jsonl_to_response(response.content.decode("utf-8"))
+
+
+def _ppocrv6_jsonl_to_response(text: str) -> dict[str, Any]:
+    ocr_results: list[Any] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        body = json.loads(line)
+        result = _as_dict(body.get("result"))
+        line_results = result.get("ocrResults")
+        if isinstance(line_results, list):
+            ocr_results.extend(line_results)
+        elif isinstance(body.get("ocrResults"), list):
+            ocr_results.extend(body["ocrResults"])
+    return {"result": {"ocrResults": ocr_results}}
 
 
 def _response_to_dict(response: Any) -> dict[str, Any]:
@@ -487,6 +592,21 @@ def _extract_source_size(data: dict[str, Any]) -> tuple[float | None, float | No
     if width and height:
         return float(width), float(height)
     return None, None
+
+
+def _infer_source_size(boxes: Any, page: PageInfo) -> tuple[float | None, float | None]:
+    if not isinstance(boxes, list):
+        return None, None
+    points = [point for box in boxes if (normalized := _box_from_value(box)) for point in normalized]
+    if len(points) < 8:
+        return None, None
+    max_x = max(point[0] for point in points)
+    max_y = max(point[1] for point in points)
+    largest_ratio = max(max_x / page.width, max_y / page.height)
+    if largest_ratio <= 1.05:
+        return None, None
+    scale = max(2, math.ceil(largest_ratio))
+    return page.width * scale, page.height * scale
 
 
 def _bbox_from_points(

@@ -173,7 +173,7 @@ def build_field_groups(
     compiled_fields: dict[str, CompiledField],
     standard_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    item_by_field_id = {item["evidence_refs"][0]: item for item in standard_items if item.get("evidence_refs")}
+    item_by_field_id = {str(item.get("field_id")): item for item in standard_items if item.get("field_id")}
     groups = []
     for entity in entities.values():
         entity_id = entity.get("entity_id")
@@ -468,12 +468,11 @@ def _revision_by_field_id(revision_blocks: list[dict[str, Any]]) -> dict[str, di
 def _standard_item_for_field(
     field: CompiledField,
     standard_items: list[dict[str, Any]],
-    item_by_first_evidence_ref: dict[str, dict[str, Any]],
+    item_by_field_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
-    if field.evidence_refs:
-        item = item_by_first_evidence_ref.get(field.evidence_refs[0])
-        if item and item.get("semantic_key") == field.semantic_key:
-            return item
+    item = item_by_field_id.get(field.field_id)
+    if item:
+        return item
     for item in standard_items:
         if item.get("semantic_key") == field.semantic_key and item.get("group_id") == field.entity_id:
             return item

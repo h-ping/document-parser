@@ -153,6 +153,8 @@ def compare_standard_to_ocr(
     artifacts: dict[str, Any],
     ocr_lines: list[OcrLine],
     image_path: Path,
+    package_structure: dict[str, Any] | None = None,
+    package_structure_scope: str = "all",
 ) -> dict[str, Any]:
     targets = build_standard_targets(artifacts)
     layout = build_package_layout(ocr_lines, artifacts.get("tables"))
@@ -161,13 +163,18 @@ def compare_standard_to_ocr(
     _assign_target_scopes(targets, layout, line_items)
     candidate_pool = _build_candidate_pool(line_items, layout)
     candidate_pool.extend(_barcode_candidates(layout.get("barcode_decode")))
+    structured_index = _package_structure_index(package_structure)
     candidates_by_target: dict[str, list[dict[str, Any]]] = {}
     extracted_items = []
     results = []
     used_line_ids: set[str] = set()
 
     for target in targets:
-        result, target_candidates = _compare_target(target, line_items, layout, candidate_pool)
+        use_structured = _use_structured_target(target, structured_index, package_structure_scope)
+        if use_structured:
+            result, target_candidates = _compare_with_structured_preference(target, structured_index, line_items, layout, candidate_pool)
+        else:
+            result, target_candidates = _compare_target(target, line_items, layout, candidate_pool)
         candidates_by_target[target["target_id"]] = [to_jsonable(candidate) for candidate in target_candidates]
         if result.get("selected_candidate"):
             used_line_ids.update(result["selected_candidate"].get("source_ocr_line_ids", []))
@@ -223,6 +230,16 @@ def compare_standard_to_ocr(
     }
 
 
+def _use_structured_target(target: dict[str, Any], structured_index: dict[str, Any] | None, scope: str) -> bool:
+    if structured_index is None:
+        return False
+    if _is_barcode_target(target):
+        return False
+    if scope == "nutrition":
+        return str(target.get("target_type") or "").startswith("nutrition_")
+    return True
+
+
 def normalize_compare_text(text: str) -> str:
     value = unicodedata.normalize("NFKC", str(text or ""))
     replacements = {
@@ -255,7 +272,7 @@ def normalize_compare_text(text: str) -> str:
 
 def normalize_ppocr_fixture_page(fixture_path: Path, fallback_width: int, fallback_height: int) -> tuple[int, int]:
     body = _read_json(fixture_path)
-    data_info = body.get("dataInfo") if isinstance(body, dict) else {}
+    data_info = (body.get("dataInfo") or body.get("data_info")) if isinstance(body, dict) else {}
     data_info_dict = _as_dict(data_info)
     first_page = _as_dict(_as_list(data_info_dict.get("pages"))[0]) if _as_list(data_info_dict.get("pages")) else {}
     width = _int_or_none(data_info_dict.get("width")) or _int_or_none(first_page.get("width")) or fallback_width
@@ -633,8 +650,254 @@ def _build_candidate_pool(line_items: list[dict[str, Any]], layout: dict[str, An
         for start in range(len(segment_lines)):
             for length in range(1, min(6, len(segment_lines) - start) + 1):
                 window = segment_lines[start : start + length]
-                candidates.append(_candidate(len(candidates) + 1, "enterprise_window", window, "enterprise subcolumn window", region_id))
+            candidates.append(_candidate(len(candidates) + 1, "enterprise_window", window, "enterprise subcolumn window", region_id))
     return candidates
+
+
+def _package_structure_index(package_structure: dict[str, Any] | None) -> dict[str, Any] | None:
+    body = _as_dict(package_structure)
+    if not body or not body.get("enabled"):
+        return None
+    fields = []
+    for index, field in enumerate(_as_list(body.get("fields")), start=1):
+        field_dict = _as_dict(field)
+        text = str(field_dict.get("text") or "").strip()
+        if not text:
+            continue
+        fields.append(
+            _text_candidate(
+                60000 + index,
+                "package_structured_field",
+                text,
+                [str(line_id) for line_id in _as_list(field_dict.get("source_ocr_line_ids"))],
+                _as_dict(field_dict.get("bbox_normalized")) or None,
+                "package field structured from GLM-OCR by LLM",
+                str(field_dict.get("group_id") or "") or None,
+                {
+                    "semantic_key": field_dict.get("semantic_key"),
+                    "label": field_dict.get("label"),
+                    "group_id": field_dict.get("group_id"),
+                    "table_id": field_dict.get("table_id"),
+                    "row_key": field_dict.get("row_key"),
+                    "source_ids": field_dict.get("source_ids", []),
+                    "confidence": field_dict.get("confidence"),
+                    "review_required": bool(field_dict.get("review_required")),
+                },
+            )
+        )
+    return {
+        "artifact_version": "package_structure_index_v0.1",
+        "fields": fields,
+        "nutrition_tables": _as_list(body.get("nutrition_tables")),
+    }
+
+
+def _compare_structured_target(target: dict[str, Any], structured_index: dict[str, Any]) -> tuple[dict[str, Any], list[CompareCandidate]]:
+    if not target.get("comparison_required", True):
+        return _manual_review_result(target, "comparison_not_required", None), []
+    if target.get("review_required"):
+        return _manual_review_result(target, "standard_item_requires_review", None), []
+
+    candidates = _structured_candidates_for_target(target, structured_index)
+    if not candidates:
+        return _result(target, "critical_missing", "package_structured_item_not_found", None), []
+
+    expected_norm = _match_normalize_for_target(target, str(target.get("expected_text") or ""))
+    long_text = _is_long_target(target)
+    exact = [
+        _with_score(candidate, 1.0, "package_structured_text_match")
+        for candidate in candidates
+        if not _structured_candidate_requires_review(candidate)
+        and _candidate_matches_for_target(target, expected_norm, _match_normalize_for_target(target, candidate.text), long_text)
+    ]
+    if exact:
+        return _result(target, "pass", "package_structured_text_match", _best_candidate(exact)), exact[:5]
+
+    scored = [
+        _with_score(candidate, _candidate_score(expected_norm, _match_normalize_for_target(target, candidate.text), long_text), candidate.reason)
+        for candidate in candidates
+    ]
+    scored = sorted(scored, key=lambda item: item.score, reverse=True)
+    selected = scored[0]
+    if _structured_candidate_requires_review(selected):
+        return _manual_review_result(target, "package_structured_item_requires_review", selected), scored[:5]
+    return _result(target, "critical_mismatch", "package_structured_text_differs", selected), scored[:5]
+
+
+def _compare_with_structured_preference(
+    target: dict[str, Any],
+    structured_index: dict[str, Any],
+    line_items: list[dict[str, Any]],
+    layout: dict[str, Any],
+    candidate_pool: list[CompareCandidate],
+) -> tuple[dict[str, Any], list[CompareCandidate]]:
+    structured_result, structured_candidates = _compare_structured_target(target, structured_index)
+    ppocr_result, ppocr_candidates = _compare_target(target, line_items, layout, candidate_pool)
+    target_candidates = [*structured_candidates, *ppocr_candidates[:5]]
+    target_type = str(target.get("target_type") or "")
+    if target_type.startswith("nutrition_"):
+        if structured_result.get("status") == "pass" and ppocr_result.get("status") != "pass":
+            structured_result = _with_result_flag(structured_result, "ppocr_glm_table_conflict")
+        return structured_result, target_candidates
+
+    if structured_result.get("status") == "pass":
+        if _ppocr_result_conflicts_with_structured(target, structured_result, ppocr_result):
+            structured_result = _with_result_flag(structured_result, "ppocr_glm_field_conflict")
+        return structured_result, target_candidates
+    if ppocr_result.get("status") == "pass":
+        if structured_candidates:
+            ppocr_result = _with_result_flag(ppocr_result, "ppocr_glm_field_conflict")
+        return ppocr_result, target_candidates
+    if _structured_mismatch_should_fall_back(target):
+        if ppocr_result.get("status") == "critical_mismatch":
+            return _result(target, "critical_missing", "no_reliable_candidate_found", None), target_candidates
+        return ppocr_result, target_candidates
+    if _result_has_structured_candidate(structured_result):
+        return structured_result, target_candidates
+    return ppocr_result, target_candidates
+
+
+def _result_has_structured_candidate(result: dict[str, Any]) -> bool:
+    candidate = _as_dict(result.get("selected_candidate"))
+    return str(candidate.get("candidate_type") or "").startswith("package_structured_")
+
+
+def _structured_mismatch_should_fall_back(target: dict[str, Any]) -> bool:
+    return str(target.get("semantic_key") or "") == "custom.other_label_text"
+
+
+def _ppocr_result_conflicts_with_structured(target: dict[str, Any], structured_result: dict[str, Any], ppocr_result: dict[str, Any]) -> bool:
+    if ppocr_result.get("status") != "pass":
+        return True
+    structured_candidate = _as_dict(structured_result.get("selected_candidate"))
+    ppocr_candidate = _as_dict(ppocr_result.get("selected_candidate"))
+    structured_text = str(structured_candidate.get("text") or "")
+    ppocr_text = str(ppocr_candidate.get("text") or "")
+    if not structured_text or not ppocr_text:
+        return True
+    return _match_normalize_for_target(target, structured_text) != _match_normalize_for_target(target, ppocr_text)
+
+
+def _structured_candidates_for_target(target: dict[str, Any], structured_index: dict[str, Any]) -> list[CompareCandidate]:
+    target_type = str(target.get("target_type") or "")
+    if target_type == "field":
+        return _structured_field_candidates_for_target(target, _as_list(structured_index.get("fields")))
+    if target_type.startswith("nutrition_"):
+        return _structured_nutrition_candidates_for_target(target, _as_list(structured_index.get("nutrition_tables")))
+    return []
+
+
+def _structured_field_candidates_for_target(target: dict[str, Any], fields: list[Any]) -> list[CompareCandidate]:
+    semantic_key = str(target.get("semantic_key") or "")
+    group_id = str(target.get("group_id") or "")
+    category = str(target.get("category") or "")
+    matches = []
+    for field in fields:
+        if not isinstance(field, CompareCandidate):
+            continue
+        metadata = _as_dict(field.metadata)
+        if str(metadata.get("semantic_key") or "") != semantic_key:
+            continue
+        if _requires_structured_label_scope(target) and not _structured_label_matches_target(target, metadata):
+            continue
+        candidate_group_id = str(metadata.get("group_id") or "")
+        if group_id and category in {"content", "enterprise"} and candidate_group_id != group_id:
+            continue
+        matches.append(field)
+    return matches
+
+
+def _requires_structured_label_scope(target: dict[str, Any]) -> bool:
+    return str(target.get("semantic_key") or "") == "custom.other_label_text"
+
+
+def _structured_label_matches_target(target: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    target_label = normalize_compare_text(str(target.get("label") or ""))
+    candidate_label = normalize_compare_text(str(metadata.get("label") or ""))
+    return bool(target_label and candidate_label and target_label == candidate_label)
+
+
+def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: list[Any]) -> list[CompareCandidate]:
+    table_id = str(target.get("table_id") or "")
+    target_type = str(target.get("target_type") or "")
+    row_key = _nutrition_row_key_match_text(str(target.get("row_key") or ""))
+    candidates = []
+    for table_index, table in enumerate(tables, start=1):
+        table_dict = _as_dict(table)
+        if table_id and str(table_dict.get("table_id") or "") != table_id:
+            continue
+        table_source_ids = [str(line_id) for line_id in _as_list(table_dict.get("source_ocr_line_ids"))]
+        if target_type == "nutrition_title":
+            candidates.append(_structured_text_candidate(61000 + table_index, "package_structured_nutrition_title", str(table_dict.get("title") or ""), table_source_ids, table_dict, table_id, table_dict))
+        elif target_type == "nutrition_header":
+            column_texts = [_nutrition_column_text(column) for column in _as_list(table_dict.get("columns"))]
+            text = " ".join(column for column in column_texts if column)
+            candidates.append(_structured_text_candidate(62000 + table_index, "package_structured_nutrition_header", text, table_source_ids, table_dict, table_id, table_dict))
+        elif target_type == "nutrition_row":
+            for row_index, row in enumerate(_as_list(table_dict.get("rows")), start=1):
+                row_dict = _as_dict(row)
+                if _nutrition_row_key_match_text(str(row_dict.get("row_key") or "")) != row_key:
+                    continue
+                text = " ".join(str(cell) for cell in _as_list(row_dict.get("cells")) if str(cell).strip())
+                candidates.append(_structured_text_candidate(63000 + table_index * 100 + row_index, "package_structured_nutrition_row", text, [str(line_id) for line_id in _as_list(row_dict.get("source_ocr_line_ids"))], row_dict, table_id, row_dict))
+        elif target_type == "nutrition_footnote":
+            for footnote_index, footnote in enumerate(_as_list(table_dict.get("footnotes")), start=1):
+                footnote_dict = _as_dict(footnote)
+                candidates.append(_structured_text_candidate(64000 + table_index * 100 + footnote_index, "package_structured_nutrition_footnote", str(footnote_dict.get("text") or ""), [str(line_id) for line_id in _as_list(footnote_dict.get("source_ocr_line_ids"))], footnote_dict, table_id, footnote_dict))
+    return candidates
+
+
+def _nutrition_column_text(column: Any) -> str:
+    column_dict = _as_dict(column)
+    if column_dict:
+        return str(column_dict.get("name") or column_dict.get("column_name") or column_dict.get("column_id") or "").strip()
+    text = str(column or "").strip()
+    match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", text)
+    return match.group(1).strip() if match else text
+
+
+def _nutrition_row_key_match_text(row_key: str) -> str:
+    return normalize_compare_text(row_key).lstrip("-—一")
+
+
+def _structured_text_candidate(
+    index: int,
+    candidate_type: str,
+    text: str,
+    line_ids: list[str],
+    source: dict[str, Any],
+    table_id: str,
+    metadata_source: dict[str, Any],
+) -> CompareCandidate:
+    return _text_candidate(
+        index,
+        candidate_type,
+        text,
+        line_ids,
+        _as_dict(source.get("bbox_normalized")) or None,
+        "package nutrition structure from GLM-OCR by LLM",
+        f"region_{table_id}" if table_id else None,
+        {
+            "table_id": table_id,
+            "source_ids": metadata_source.get("source_ids", []),
+            "confidence": metadata_source.get("confidence"),
+            "review_required": bool(metadata_source.get("review_required")),
+        },
+    )
+
+
+def _structured_candidate_requires_review(candidate: CompareCandidate) -> bool:
+    metadata = _as_dict(candidate.metadata)
+    if candidate.candidate_type != "package_structured_field":
+        return bool(metadata.get("review_required"))
+    if not candidate.source_ocr_line_ids:
+        return True
+    confidence = metadata.get("confidence")
+    try:
+        low_confidence = float(confidence) < 0.8
+    except (TypeError, ValueError):
+        low_confidence = True
+    return bool(metadata.get("review_required")) or low_confidence
 
 
 def _split_line_candidates(line: dict[str, Any], start_index: int) -> list[CompareCandidate]:
@@ -1319,7 +1582,29 @@ def _candidate_matches(expected_norm: str, candidate_norm: str, long_text: bool)
 def _candidate_matches_for_target(target: dict[str, Any], expected_norm: str, candidate_norm: str, long_text: bool) -> bool:
     if not expected_norm or not _prefix_compatible(expected_norm, candidate_norm):
         return False
+    target_type = str(target.get("target_type") or "")
+    if target_type == "nutrition_header":
+        return _nutrition_header_matches_target(target, candidate_norm)
+    if target_type == "nutrition_row":
+        return _nutrition_row_matches_target(target, candidate_norm)
     return _candidate_matches(expected_norm, candidate_norm, long_text)
+
+
+def _nutrition_header_matches_target(target: dict[str, Any], candidate_norm: str) -> bool:
+    expected_parts = [normalize_compare_text(part) for part in str(target.get("expected_text") or "").split() if part.strip()]
+    return bool(expected_parts) and all(_nutrition_header_part_present(part, candidate_norm) for part in expected_parts)
+
+
+def _nutrition_row_matches_target(target: dict[str, Any], candidate_norm: str) -> bool:
+    row_key = normalize_compare_text(str(target.get("row_key") or ""))
+    row_variants = _row_label_variants(row_key)
+    row_variants.add(_nutrition_row_key_match_text(row_key))
+    if row_variants and not any(variant and variant in candidate_norm for variant in row_variants):
+        return False
+    expected_values = _nutrition_expected_value_norms(target)
+    if expected_values:
+        return all(value in candidate_norm for value in expected_values)
+    return str(target.get("normalized_expected_text") or "") == candidate_norm
 
 
 def _is_viable_mismatch_candidate(target: dict[str, Any], expected_norm: str, candidate: CompareCandidate) -> bool:
@@ -1426,6 +1711,15 @@ def _manual_review_result(target: dict[str, Any], reason: str, candidate: Compar
     return _result(target, "manual_review", reason, candidate)
 
 
+def _with_result_flag(result: dict[str, Any], flag: str) -> dict[str, Any]:
+    updated = dict(result)
+    flags = [str(item) for item in _as_list(updated.get("match_quality_flags"))]
+    if flag not in flags:
+        flags.append(flag)
+    updated["match_quality_flags"] = flags
+    return updated
+
+
 def _severity_for_status(status: str) -> str:
     return {
         "pass": "none",
@@ -1500,6 +1794,15 @@ def _match_quality_flags(target: dict[str, Any], status: str, reason: str, candi
         flags.append("multi_field_ocr_line")
     if candidate and candidate.candidate_type == "barcode_decoder":
         flags.append("barcode_decoder_match")
+    if candidate and candidate.candidate_type.startswith("package_structured_"):
+        flags.append("llm_structured_package_item")
+        flags.append("final_decision_by_rules")
+        if "nutrition" in candidate.candidate_type:
+            flags.append("glm_structured_table_match")
+        elif candidate.candidate_type == "package_structured_field" and status == "pass":
+            flags.append("glm_structured_field_match")
+        if _structured_candidate_requires_review(candidate):
+            flags.append("llm_structured_item_review_required")
     if candidate and "separator_insensitive" in candidate.reason:
         flags.append("separator_insensitive_match")
     if candidate and _candidate_has_noise(candidate):

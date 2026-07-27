@@ -277,6 +277,10 @@ class StandardXlsxParser:
         write_json(debug_dir / "vdg_quality_report.json", metadata["vdg_quality_report"])
         write_json(debug_dir / "vdg_agent_context.json", metadata["vdg_agent_context"])
         write_json(debug_dir / "vdg_consumption_report.json", metadata["vdg_consumption_report"])
+        write_json(debug_dir / "pdf_character_atoms.json", metadata["pdf_character_atoms"])
+        write_json(debug_dir / "layout_candidates.json", metadata["layout_candidates"])
+        write_json(debug_dir / "layout_quality_report.json", metadata["layout_quality_report"])
+        write_json(debug_dir / "layout_candidate_acceptance_report.json", metadata["layout_candidate_acceptance_report"])
         write_json(debug_dir / "label_text_scope_reference.json", metadata["label_text_scope_reference"])
         write_json(debug_dir / "label_text_scope_agent_context.json", metadata["label_text_scope_agent_context"])
         write_json(debug_dir / "label_text_scope_report.json", metadata["label_text_scope_report"])
@@ -626,6 +630,9 @@ class _XlsxArtifactBuilder:
         tables_artifact = build_tables_artifact(self.tables)
         lists_artifact = build_lists_artifact(field_groups)
         vdg_quality_report = _vdg_quality_report()
+        layout_candidates = _disabled_layout_candidates()
+        layout_quality_report = _disabled_layout_quality_report()
+        layout_candidate_acceptance_report = _disabled_layout_acceptance_report()
         label_text_scope_reference = load_label_text_scope_reference()
         label_text_scope_agent_context = build_label_text_scope_agent_context(label_text_scope_reference)
         label_text_scope_report = _label_text_scope_report(label_text_scope_reference)
@@ -714,6 +721,10 @@ class _XlsxArtifactBuilder:
                 "vdg_quality_report": vdg_quality_report,
                 "vdg_agent_context": _vdg_agent_context(table_layers),
                 "vdg_consumption_report": _vdg_consumption_report(),
+                "pdf_character_atoms": [],
+                "layout_candidates": layout_candidates,
+                "layout_quality_report": layout_quality_report,
+                "layout_candidate_acceptance_report": layout_candidate_acceptance_report,
                 "label_text_scope_reference": label_text_scope_reference,
                 "label_text_scope_agent_context": label_text_scope_agent_context,
                 "label_text_scope_report": label_text_scope_report,
@@ -1577,6 +1588,55 @@ def _vdg_quality_report() -> dict[str, Any]:
     }
 
 
+def _disabled_layout_candidates() -> dict[str, Any]:
+    return {
+        "artifact_version": "layout_candidates_v0.1",
+        "status": "disabled",
+        "source_nodes": [],
+        "table_candidates": [],
+        "reading_order_candidates": [],
+        "side_marker_candidates": [],
+        "quality_issues": [],
+        "cross_page_candidate_count": 0,
+        "applicability": "not_applicable_for_structured_xlsx",
+    }
+
+
+def _disabled_layout_quality_report() -> dict[str, Any]:
+    return {
+        "report_version": "layout_quality_v0.1",
+        "status": "disabled",
+        "mode": "legacy",
+        "source_span_coverage_rate": 0.0,
+        "pdf_character_atom_count": 0,
+        "dropped_control_char_count": 0,
+        "layout_candidate_count": 0,
+        "nutrition_layout_candidate_count": 0,
+        "producer_layout_candidate_count": 0,
+        "layout_boundary_issue_count": 0,
+        "cross_page_candidate_count": 0,
+        "fallback_used": False,
+        "issues": [],
+        "applicability": "not_applicable_for_structured_xlsx",
+    }
+
+
+def _disabled_layout_acceptance_report() -> dict[str, Any]:
+    return {
+        "report_version": "layout_candidate_acceptance_v0.1",
+        "status": "disabled",
+        "layout_mode": "legacy",
+        "candidate_count": 0,
+        "accepted_candidate_count": 0,
+        "unaccepted_candidate_count": 0,
+        "invalid_decision_count": 0,
+        "decisions": [],
+        "invalid_decisions": [],
+        "candidate_artifact_status": "disabled",
+        "applicability": "not_applicable_for_structured_xlsx",
+    }
+
+
 def _vdg_agent_context(table_layers: dict[str, Any]) -> dict[str, Any]:
     return {
         "context_version": "vdg_agent_context_v0.1",
@@ -1691,6 +1751,9 @@ def _write_layered_debug_artifacts(debug_dir: Path, result: ParseResult, workboo
     write_json(debug_dir / "00_inputs" / "xlsx_workbook_structure.json", workbook_structure)
     write_json(debug_dir / "01_text_extraction" / "source_layers.json", metadata["source_layers"])
     write_json(debug_dir / "01_text_extraction" / "visual_document_graph.json", metadata["visual_document_graph"])
+    write_json(debug_dir / "01_text_extraction" / "pdf_character_atoms.json", metadata["pdf_character_atoms"])
+    write_json(debug_dir / "01_text_extraction" / "layout_candidates.json", metadata["layout_candidates"])
+    write_json(debug_dir / "01_text_extraction" / "layout_quality_report.json", metadata["layout_quality_report"])
     write_json(debug_dir / "01_table_extraction" / "table_layers.json", metadata["table_parser"]["table_layers"])
     write_json(debug_dir / "02_section_detection" / "regions.json", result.extracted_data["regions"])
     write_json(debug_dir / "03_field_structure" / "standard_items.json", standard["standard_items"])

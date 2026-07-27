@@ -16,6 +16,9 @@ def write_schema_artifacts(output_dir: Path) -> None:
 
 
 def _source_schema_text() -> str:
+    package_artifact_schema = resources.files("document_parser").joinpath(FINAL_RESULT_SCHEMA_ARTIFACT)
+    if package_artifact_schema.is_file():
+        return package_artifact_schema.read_text(encoding="utf-8")
     package_schema = resources.files("document_parser").joinpath("resources/final_result.schema.json")
     if package_schema.is_file():
         return package_schema.read_text(encoding="utf-8")

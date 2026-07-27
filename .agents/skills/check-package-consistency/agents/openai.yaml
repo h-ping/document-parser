@@ -1,0 +1,4 @@
+interface:
+  display_name: "Package Consistency Check"
+  short_description: "Run packaging text consistency checks"
+  default_prompt: "Use $check-package-consistency to initialize the CLI, compare a standard template Excel with a package artwork image, publish the report to COS, and summarize the public link."

@@ -87,10 +87,20 @@ def build_image_compare_html(
             "</div>",
             "</div>",
             '<div class="pane image-pane">',
-            '<div class="pane-header"><h2>包装图</h2><span>点击右侧结果高亮识别位置</span></div>',
-            f'<div class="image-wrap" style="aspect-ratio:{image_width} / {image_height}">',
+            '<div class="pane-header image-header">',
+            "<h2>包装图</h2>",
+            '<div class="image-tools" aria-label="包装图缩放">',
+            '<button class="zoom-button" id="zoom-out" type="button" title="缩小包装图" aria-label="缩小包装图">-</button>',
+            '<span id="zoom-label" aria-live="polite">100%</span>',
+            '<button class="zoom-button" id="zoom-in" type="button" title="放大包装图" aria-label="放大包装图">+</button>',
+            '<button class="zoom-button" id="zoom-reset" type="button" title="恢复原始大小" aria-label="恢复原始大小">↺</button>',
+            "</div>",
+            "</div>",
+            '<div class="image-viewport">',
+            f'<div class="image-wrap" style="--image-zoom:1;aspect-ratio:{image_width} / {image_height}">',
             f'<img src="{_attr(image_src)}" alt="包装图">',
             boxes,
+            "</div>",
             "</div>",
             "</div>",
             '<div class="pane result-pane">',
@@ -154,7 +164,8 @@ def _quality_banner(report: dict[str, Any] | None) -> str:
 
 
 def _ocr_box(line: dict[str, Any]) -> str:
-    bbox = _as_dict(line.get("bbox_normalized"))
+    line_dict = _as_dict(line)
+    bbox = _as_dict(line_dict.get("bbox_normalized"))
     if not bbox:
         return ""
     x1 = float(bbox.get("x1") or 0)
@@ -163,8 +174,8 @@ def _ocr_box(line: dict[str, Any]) -> str:
     y2 = float(bbox.get("y2") or 0)
     return (
         '<button class="ocr-box" type="button" '
-        f'data-line-id="{_attr(line.get("ocr_line_id"))}" '
-        f'title="{_attr(line.get("text"))}" '
+        f'data-line-id="{_attr(line_dict.get("ocr_line_id"))}" '
+        f'title="{_attr(line_dict.get("text"))}" '
         f'style="left:{x1 * 100:.4f}%;top:{y1 * 100:.4f}%;width:{(x2 - x1) * 100:.4f}%;height:{(y2 - y1) * 100:.4f}%;">'
         "</button>"
     )
@@ -402,10 +413,40 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "__dict__"):
+        return {key: item for key, item in vars(value).items() if not key.startswith("_")}
+    return {}
 
 
 _SCRIPT = """
+const MIN_IMAGE_ZOOM = 0.5;
+const MAX_IMAGE_ZOOM = 4;
+const IMAGE_ZOOM_STEP = 0.25;
+const AUTO_FOCUS_ZOOM = 2;
+let imageZoom = 1;
+function setImageZoom(nextZoom) {
+  const imageViewport = document.querySelector('.image-viewport');
+  const imageWrap = document.querySelector('.image-wrap');
+  if (!imageViewport || !imageWrap) return;
+  const previousWidth = imageWrap.scrollWidth || 1;
+  const previousHeight = imageWrap.scrollHeight || 1;
+  const centerX = (imageViewport.scrollLeft + imageViewport.clientWidth / 2) / previousWidth;
+  const centerY = (imageViewport.scrollTop + imageViewport.clientHeight / 2) / previousHeight;
+  imageZoom = Math.min(MAX_IMAGE_ZOOM, Math.max(MIN_IMAGE_ZOOM, Math.round(nextZoom * 100) / 100));
+  imageWrap.style.setProperty('--image-zoom', String(imageZoom));
+  const zoomLabel = document.getElementById('zoom-label');
+  if (zoomLabel) zoomLabel.textContent = `${Math.round(imageZoom * 100)}%`;
+  const zoomOut = document.getElementById('zoom-out');
+  const zoomIn = document.getElementById('zoom-in');
+  if (zoomOut) zoomOut.disabled = imageZoom <= MIN_IMAGE_ZOOM;
+  if (zoomIn) zoomIn.disabled = imageZoom >= MAX_IMAGE_ZOOM;
+  requestAnimationFrame(() => {
+    imageViewport.scrollLeft = Math.max(0, centerX * imageWrap.scrollWidth - imageViewport.clientWidth / 2);
+    imageViewport.scrollTop = Math.max(0, centerY * imageWrap.scrollHeight - imageViewport.clientHeight / 2);
+  });
+}
 function cardMatchesFilter(card, filter) {
   const status = card.dataset.status || '';
   if (filter === 'all') return true;
@@ -439,7 +480,11 @@ function clearActive() {
 function activateTarget(targetId) {
   clearActive();
   const card = document.querySelector(`.result-card[data-target-id="${CSS.escape(targetId)}"]`);
-  if (card) card.classList.add('active');
+  if (card && card.hidden) applyFilter('all', '全部');
+  if (card) {
+    card.classList.add('active');
+    card.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'smooth'});
+  }
   const standardItem = document.querySelector(`.standard-item[data-target-id="${CSS.escape(targetId)}"]`);
   if (standardItem) {
     standardItem.classList.add('active');
@@ -450,7 +495,10 @@ function activateTarget(targetId) {
     document.querySelectorAll(`.ocr-box[data-line-id="${CSS.escape(lineId)}"]`).forEach(el => el.classList.add('active'));
   });
   const first = lineIds.map(lineId => document.querySelector(`.ocr-box[data-line-id="${CSS.escape(lineId)}"]`)).find(Boolean);
-  if (first) first.scrollIntoView({block: 'center', inline: 'center', behavior: 'smooth'});
+  if (first) {
+    setImageZoom(Math.max(imageZoom, AUTO_FOCUS_ZOOM));
+    requestAnimationFrame(() => first.scrollIntoView({block: 'center', inline: 'center', behavior: 'smooth'}));
+  }
 }
 document.querySelectorAll('.result-card').forEach(card => {
   card.addEventListener('click', () => activateTarget(card.dataset.targetId || ''));
@@ -464,6 +512,10 @@ document.querySelectorAll('.summary-card').forEach(card => {
     applyFilter(card.dataset.filterStatus || 'all', label);
   });
 });
+document.getElementById('zoom-out')?.addEventListener('click', () => setImageZoom(imageZoom - IMAGE_ZOOM_STEP));
+document.getElementById('zoom-in')?.addEventListener('click', () => setImageZoom(imageZoom + IMAGE_ZOOM_STEP));
+document.getElementById('zoom-reset')?.addEventListener('click', () => setImageZoom(1));
+setImageZoom(1);
 applyFilter('all', '全部');
 """
 
@@ -618,13 +670,58 @@ h1 {
   word-break: break-word;
 }
 .image-pane {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
+  overflow: hidden;
+}
+.image-viewport {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  max-height: calc(100vh - 140px);
+}
+.image-header {
+  align-items: center;
+}
+.image-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.image-tools #zoom-label {
+  min-width: 42px;
+  text-align: center;
+  color: #394150;
+  font-variant-numeric: tabular-nums;
+}
+.zoom-button {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d8dee9;
+  background: #fff;
+  color: #394150;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.zoom-button:hover {
+  border-color: #2b6ef6;
+  color: #2b6ef6;
+}
+.zoom-button:focus-visible {
+  outline: 2px solid #2b6ef6;
+  outline-offset: 2px;
+}
+.zoom-button:disabled {
+  color: #a4adba;
+  cursor: not-allowed;
 }
 .image-wrap {
   position: relative;
-  width: 100%;
-  min-width: 520px;
+  width: calc(100% * var(--image-zoom));
+  min-width: 0;
+  margin-inline: auto;
 }
 .image-wrap img {
   display: block;

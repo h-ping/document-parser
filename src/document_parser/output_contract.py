@@ -127,6 +127,11 @@ def build_output_contract_validation_report(result: Any) -> dict[str, Any]:
     label_text_scope_reference = _as_dict(metadata.get("label_text_scope_reference"))
     label_text_scope_agent_context = _as_dict(metadata.get("label_text_scope_agent_context"))
     label_text_scope_report = _as_dict(metadata.get("label_text_scope_report"))
+    pdf_character_atoms = _as_list(metadata.get("pdf_character_atoms"))
+    layout_candidates = _as_dict(metadata.get("layout_candidates"))
+    layout_quality_report = _as_dict(metadata.get("layout_quality_report"))
+    layout_candidate_acceptance_report = _as_dict(metadata.get("layout_candidate_acceptance_report"))
+    semantic_review_report = _as_dict(metadata.get("semantic_review_report"))
     _check_required_keys(
         checks,
         "metadata",
@@ -144,6 +149,10 @@ def build_output_contract_validation_report(result: Any) -> dict[str, Any]:
             "label_text_scope_reference",
             "label_text_scope_agent_context",
             "label_text_scope_report",
+            "pdf_character_atoms",
+            "layout_candidates",
+            "layout_quality_report",
+            "layout_candidate_acceptance_report",
             "missing_item_report",
             "repair_loop",
             "schema_audit",
@@ -608,6 +617,32 @@ def build_output_contract_validation_report(result: Any) -> dict[str, Any]:
         "Label text scope report is machine-readable and blocks out-of-scope extraction.",
         {"failures": _label_text_scope_report_failures(label_text_scope_report)},
     )
+    layout_failures = _layout_evidence_contract_failures(
+        pdf_character_atoms,
+        layout_candidates,
+        layout_quality_report,
+        layout_candidate_acceptance_report,
+        source_layers,
+        _as_dict(metadata.get("agent_harness")),
+    )
+    _add_check(
+        checks,
+        "layout_evidence_contract",
+        "metadata.layout_quality_report",
+        not layout_failures,
+        "Layout evidence has valid atoms, bboxes, source refs, exclusive canonical PDF spans and mandatory review routes.",
+        {"failures": layout_failures},
+    )
+    if "semantic_review_report" in metadata or str(layout_quality_report.get("mode")) == "char_atoms_high_recall":
+        semantic_review_failures = _semantic_review_report_failures(semantic_review_report, layout_quality_report)
+        _add_check(
+            checks,
+            "semantic_review_contract",
+            "metadata.semantic_review_report",
+            not semantic_review_failures,
+            "Enhanced extraction emits an independent semantic review report with evidence-bound findings.",
+            {"failures": semantic_review_failures},
+        )
     _add_check(
         checks,
         "region_vdg_refs",
@@ -1615,6 +1650,15 @@ def _validation_route_options(check: dict[str, Any]) -> list[tuple[str, str, str
         if issue_types:
             return [("generated_schema", "generated_schema", issue_type) for issue_type in issue_types]
         return [("generated_schema", "generated_schema", "schema_audit_issue")]
+    if check_type == "semantic_review":
+        issue_types = [
+            str(issue.get("issue_type"))
+            for issue in _as_list(check.get("issues"))
+            if isinstance(issue, dict) and issue.get("issue_type")
+        ]
+        return [("document", "document", issue_type) for issue_type in issue_types] or [
+            ("document", "document", "semantic_review_issue")
+        ]
     if check_type in {
         "vdg_quality",
         "vdg_boundary_validation",
@@ -1625,6 +1669,9 @@ def _validation_route_options(check: dict[str, Any]) -> list[tuple[str, str, str
         "label_text_scope_reference",
         "label_text_scope_gate",
         "label_text_scope_unknown",
+        "layout_quality",
+        "layout_candidate_acceptance",
+        "layout_boundary_validation",
     }:
         return [("document", "document", f"{check_type}_failed")]
     return []
@@ -1996,13 +2043,38 @@ def _standard_item_ref_failures(items: list[Any], field_ids: set[str], evidence_
 def _joined_evidence_text(refs: list[Any], evidence_by_id: dict[str, dict[str, Any]]) -> str | None:
     if not refs:
         return None
-    texts = []
+    items = []
     for ref in refs:
         evidence = evidence_by_id.get(str(ref))
         if not evidence:
             return None
-        texts.append(str(evidence.get("source_text", "")))
-    return "\n".join(texts).strip()
+        items.append(evidence)
+    value = str(items[0].get("source_text", ""))
+    for previous, current in zip(items, items[1:]):
+        value += _evidence_separator(previous, current) + str(current.get("source_text", ""))
+    return value.strip()
+
+
+def _evidence_separator(previous: dict[str, Any], current: dict[str, Any]) -> str:
+    previous_methods = {str(value) for value in _as_list(previous.get("extraction_methods"))}
+    current_methods = {str(value) for value in _as_list(current.get("extraction_methods"))}
+    previous_bbox = _as_dict(previous.get("bbox_pdf"))
+    current_bbox = _as_dict(current.get("bbox_pdf"))
+    if "pdf_char_atom" not in previous_methods or "pdf_char_atom" not in current_methods or not previous_bbox or not current_bbox:
+        return "\n"
+    if previous.get("page") != current.get("page"):
+        return "\n"
+    previous_center = float(previous_bbox.get("y", 0)) + float(previous_bbox.get("height", 0)) / 2
+    current_center = float(current_bbox.get("y", 0)) + float(current_bbox.get("height", 0)) / 2
+    tolerance = max(1.25, min(float(previous_bbox.get("height", 0)), float(current_bbox.get("height", 0))) * 0.35)
+    if abs(previous_center - current_center) > tolerance:
+        return "\n"
+    previous_text = str(previous.get("source_text", ""))
+    current_text = str(current.get("source_text", ""))
+    gap = float(current_bbox.get("x", 0)) - (float(previous_bbox.get("x", 0)) + float(previous_bbox.get("width", 0)))
+    if gap > 1.0 and previous_text[-1:].isascii() and previous_text[-1:].isalnum() and current_text[:1].isascii() and current_text[:1].isalnum():
+        return " "
+    return ""
 
 
 def _missing_item_leaks(
@@ -2645,6 +2717,120 @@ def _label_text_scope_report_failures(report: dict[str, Any]) -> list[dict[str, 
     if missing:
         failures.insert(0, {"missing_or_invalid": sorted(set(missing))})
     return failures
+
+
+def _layout_evidence_contract_failures(
+    atoms: list[Any],
+    candidates: dict[str, Any],
+    quality: dict[str, Any],
+    acceptance: dict[str, Any],
+    source_layers: dict[str, Any],
+    agent_harness: dict[str, Any],
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    mode = str(quality.get("mode") or "legacy")
+    status = str(quality.get("status") or "")
+    if mode == "legacy":
+        if status != "disabled":
+            failures.append({"reason": "legacy_layout_quality_not_disabled", "actual": status})
+        return failures
+    if mode != "char_atoms_high_recall":
+        return [{"reason": "unsupported_layout_mode", "actual": mode}]
+    if status not in {"pass", "review_required"}:
+        failures.append({"reason": "layout_quality_failed", "actual": status})
+
+    atom_ids = [str(atom.get("span_id")) for atom in atoms if isinstance(atom, dict) and atom.get("span_id")]
+    if len(atom_ids) != len(atoms) or len(set(atom_ids)) != len(atom_ids):
+        failures.append({"reason": "atom_ids_missing_or_not_unique"})
+    invalid_bbox_ids = [
+        str(atom.get("span_id"))
+        for atom in atoms
+        if isinstance(atom, dict) and not _layout_bbox_valid(_as_dict(atom.get("bbox_pdf")))
+    ]
+    if invalid_bbox_ids:
+        failures.append({"reason": "atom_bbox_invalid", "span_ids": invalid_bbox_ids[:50]})
+
+    source_modes = {
+        str(span.get("source"))
+        for span in _as_list(source_layers.get("spans"))
+        if isinstance(span, dict)
+    }
+    if "pdf_text" in source_modes and "pdf_char_atom" in source_modes:
+        failures.append({"reason": "canonical_pdf_sources_mixed"})
+
+    known_ids = set(atom_ids) | {
+        str(span.get("span_id"))
+        for span in _as_list(source_layers.get("spans"))
+        if isinstance(span, dict) and span.get("span_id")
+    }
+    candidate_ids: set[str] = set()
+    unresolved_refs: set[str] = set()
+    for candidate in _as_list(candidates.get("table_candidates")):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("table_candidate_id") or "")
+        if candidate_id:
+            candidate_ids.add(candidate_id)
+        for ref in _layout_candidate_refs(candidate):
+            if ref not in known_ids:
+                unresolved_refs.add(ref)
+    if unresolved_refs:
+        failures.append({"reason": "layout_candidate_source_refs_unresolved", "source_span_ids": sorted(unresolved_refs)[:50]})
+
+    accepted_ids = {
+        str(item.get("layout_candidate_id"))
+        for item in _as_list(acceptance.get("decisions"))
+        if isinstance(item, dict) and item.get("decision") == "accept"
+    }
+    review_ids = {
+        str(item.get("layout_candidate_id"))
+        for item in _as_list(agent_harness.get("review_items"))
+        if isinstance(item, dict) and item.get("layout_candidate_id") and item.get("required") is True
+    }
+    unreviewed_ids = sorted(candidate_ids - accepted_ids - review_ids)
+    if unreviewed_ids:
+        failures.append({"reason": "unaccepted_layout_candidate_without_mandatory_review", "candidate_ids": unreviewed_ids})
+    return failures
+
+
+def _semantic_review_report_failures(report: dict[str, Any], layout_quality: dict[str, Any]) -> list[dict[str, Any]]:
+    mode = str(layout_quality.get("mode") or "legacy")
+    status = str(report.get("status") or "")
+    if mode == "legacy":
+        return [] if status == "disabled" else [{"reason": "legacy_semantic_review_not_disabled", "actual": status}]
+    failures: list[dict[str, Any]] = []
+    if report.get("artifact_version") != "semantic_review_report_v0.1":
+        failures.append({"reason": "invalid_artifact_version", "actual": report.get("artifact_version")})
+    if status not in {"pass", "review_required"}:
+        failures.append({"reason": "invalid_status", "actual": status})
+    if report.get("review_agent_independent") is not True:
+        failures.append({"reason": "independent_review_not_executed"})
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        failures.append({"reason": "findings_not_list"})
+    return failures
+
+
+def _layout_candidate_refs(candidate: dict[str, Any]) -> set[str]:
+    refs = {str(value) for value in _as_list(candidate.get("source_span_ids")) if value}
+    for row in _as_list(candidate.get("rows")):
+        if not isinstance(row, dict):
+            continue
+        refs.update(str(value) for value in _as_list(row.get("source_span_ids")) if value)
+        for cell in _as_list(row.get("cells")):
+            if isinstance(cell, dict):
+                refs.update(str(value) for value in _as_list(cell.get("source_span_ids")) if value)
+    return refs
+
+
+def _layout_bbox_valid(bbox: dict[str, Any]) -> bool:
+    try:
+        x, y = float(bbox["x"]), float(bbox["y"])
+        width, height = float(bbox["width"]), float(bbox["height"])
+        page_width, page_height = float(bbox["page_width"]), float(bbox["page_height"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return x >= 0 and y >= 0 and width > 0 and height > 0 and x + width <= page_width + 0.01 and y + height <= page_height + 0.01
 
 
 def _region_vdg_ref_failures(regions: list[Any], graph: dict[str, Any]) -> list[dict[str, Any]]:

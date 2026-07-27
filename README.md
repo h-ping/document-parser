@@ -43,25 +43,28 @@ python3 -m pip install --upgrade --force-reinstall --no-cache-dir \
 
 ## 环境变量
 
-真实识别包装图文字时需要 GLM-OCR 密钥。推荐用环境变量配置：
+真实识别包装图文字时默认使用双 OCR：PP-OCR 负责普通标签文字和精确位置，GLM-OCR 负责版面结构和营养成分表。生产运行推荐同时配置两个密钥：
 
 ```bash
 GLM_OCR_API_KEY=...
+PPOCRV6_TOKEN=...
 ```
 
-也兼容 `ZAI_API_KEY`、`ZHIPUAI_API_KEY`。如模型名变更，可选配置：
+GLM-OCR 也兼容 `ZAI_API_KEY`、`ZHIPUAI_API_KEY`；PP-OCR 也兼容 `PPOCRV6_API_KEY`。如模型名变更，可选配置：
 
 ```bash
 GLM_OCR_MODEL=glm-ocr
+PPOCRV6_MODEL=PP-OCRv6
 ```
 
-如果没有提前设置 `GLM_OCR_API_KEY`，运行真实 OCR 时命令会提示输入：
+如果没有提前设置密钥，并且是在交互式终端运行，命令会提示输入：
 
 ```text
 请输入 GLM_OCR_API_KEY（输入不会显示，且只在本次运行中使用）：
+请输入 PPOCRV6_TOKEN（输入不会显示，且只在本次运行中使用）：
 ```
 
-交互式输入的 token 只写入当前进程环境，不会保存到文件，也不会写入报告目录。
+交互式输入的 token 只写入当前进程环境，不会保存到文件，也不会写入报告目录。非交互环境不会弹出提示，缺少密钥会直接失败。
 
 ## 发布到腾讯云 COS
 
@@ -116,13 +119,24 @@ check-package-consistency \
   --output-dir out/package_consistency_report
 ```
 
-离线回归或测试时，可以传入已录制的包装图文字识别结果；这种模式不需要配置 OCR 密钥：
+离线回归或测试时，可以传入已录制的包装图文字识别结果；这种模式不需要配置 OCR 密钥。旧参数 `--ocr-fixture` 会按 PP-OCR 离线结果处理：
 
 ```bash
 check-package-consistency \
   --standard path/to/standard.xlsx \
   --image path/to/package.jpg \
   --ocr-fixture test_ocr/zongzi_ocr_result.json \
+  --output-dir out/package_consistency_report
+```
+
+如果同时有 PP-OCR 和 GLM-OCR 的离线结果，使用：
+
+```bash
+check-package-consistency \
+  --standard path/to/standard.xlsx \
+  --image path/to/package.jpg \
+  --ppocr-fixture test_ocr/package_ppocr_result.json \
+  --glm-ocr-fixture test_ocr/package_glm_ocr_result.json \
   --output-dir out/package_consistency_report
 ```
 
@@ -141,6 +155,10 @@ check-package-consistency \
 - `result_preview.html`：客户可读的一致性报告
 - `comparison_result.json`：字段级一致性结果
 - `package_ocr_lines.json`：包装图文字识别行
+- `package_ppocr_lines.json`：PP-OCR 识别行
+- `package_glm_lines.json`：GLM-OCR 识别行
+- `package_fusion_evidence.json`：双 OCR 融合证据来源
+- `package_fusion_quality_report.json`：双 OCR 融合质量提示
 - `package_ocr_quality_report.json`：文字识别位置质量报告
 - `pipeline_summary.json`：两阶段状态、运行 ID、输入文件、关键产物和耗时
 - `failure_result.json`：失败时输出，记录失败阶段和原因

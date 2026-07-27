@@ -1,0 +1,8 @@
+{
+  "logId": "fixture-empty",
+  "errorCode": 0,
+  "errorMsg": "Success",
+  "result": {
+    "ocrResults": []
+  }
+}

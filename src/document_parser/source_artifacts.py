@@ -97,6 +97,11 @@ def build_source_layers(
                 "bbox_available_count": sum(1 for span in spans if span.source == "pdf_text" and span.bbox_pdf is not None),
                 "warnings": list(getattr(perception, "warnings", [])),
             },
+            "pdf_character_atoms": {
+                "available": any(span.source == "pdf_char_atom" for span in spans),
+                "span_count": sum(1 for span in spans if span.source == "pdf_char_atom"),
+                "bbox_available_count": sum(1 for span in spans if span.source == "pdf_char_atom" and span.bbox_pdf is not None),
+            },
             "ocr": {
                 "provider": "glm_ocr",
                 "status": "failed" if ocr_error else "pass",
@@ -309,6 +314,11 @@ def _control_char_count(text: str) -> int:
 def _source_mode(pdf_text_available: bool, ocr_lines: list[OcrLine], spans: list[TextSpan]) -> str:
     if not spans:
         return "empty"
+    atoms_available = any(span.source == "pdf_char_atom" for span in spans)
+    if atoms_available and ocr_lines:
+        return "pdf_character_atoms_plus_ocr"
+    if atoms_available:
+        return "pdf_character_atoms_only"
     if pdf_text_available and ocr_lines:
         return "pdf_text_plus_ocr"
     if pdf_text_available:

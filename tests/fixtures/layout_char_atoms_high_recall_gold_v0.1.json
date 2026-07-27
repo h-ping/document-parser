@@ -1,0 +1,55 @@
+{
+  "fixture_version": "layout_char_atoms_high_recall_gold_v0.1",
+  "privacy_policy": "field_boundaries_and_structure_counts_only",
+  "cases": {
+    "xufuji": {
+      "required_independent_atoms": [
+        "产品类型:混合胶型",
+        "66",
+        "1/3包",
+        "≥2.5%的软糖"
+      ],
+      "forbidden_adhesions": [
+        "产品类型:混合胶型 66",
+        "1/3包 ≥2.5%的软糖"
+      ],
+      "nutrition_items": [
+        "能量",
+        "蛋白质",
+        "脂肪",
+        "饱和脂肪",
+        "碳水化合物",
+        "糖",
+        "钠"
+      ],
+      "expected_nutrition_item_count": 7
+    },
+    "youleme": {
+      "required_side_markers": ["标", "签"],
+      "required_reading_order": ["委托方", "地址"],
+      "required_structure": "producer_info_repeated_rows_or_review",
+      "nutrition_items": [
+        "能量",
+        "蛋白质",
+        "脂肪",
+        "饱和脂肪",
+        "反式脂肪酸",
+        "碳水化合物",
+        "糖",
+        "钠"
+      ],
+      "expected_nutrition_item_count": 8
+    },
+    "zongzi": {
+      "expected_nutrition_candidate_count": 9,
+      "common_nutrition_items": [
+        "能量",
+        "蛋白质",
+        "脂肪",
+        "碳水化合物",
+        "钠"
+      ],
+      "cross_page_policy": "suspected_with_bbox_no_silent_drop"
+    }
+  }
+}
