@@ -28,6 +28,7 @@ PPOCRV6_OPTIONAL_PAYLOAD: dict[str, Any] = {
     "useDocUnwarping": False,
     "useTextlineOrientation": True,
 }
+PPOCRV6_RETRYABLE_POLL_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 class OcrError(RuntimeError):
@@ -124,23 +125,35 @@ class PPOCRV6Client(OcrClient):
         if not path.exists():
             raise OcrError(f"PP-OCRv6 input file does not exist: {path}")
         headers = {"Authorization": f"bearer {self._api_key}"}
-        try:
-            with path.open("rb") as handle:
-                response = requests.post(
-                    self._job_url,
-                    headers=headers,
-                    data={"model": self._model, "optionalPayload": json.dumps(PPOCRV6_OPTIONAL_PAYLOAD, ensure_ascii=False)},
-                    files={"file": handle},
-                    timeout=120,
-                )
-        except requests.RequestException as exc:
-            raise OcrError(f"PP-OCRv6 job submit failed: {exc.__class__.__name__}") from exc
-        if response.status_code != 200:
-            raise OcrError(f"PP-OCRv6 job submit failed with HTTP {response.status_code}")
+        response = self._submit_job(path, headers)
         job_id = str(_as_dict(_as_dict(response.json()).get("data")).get("jobId") or "")
         if not job_id:
             raise OcrError("PP-OCRv6 job submit response did not include data.jobId.")
         return self._poll_result(job_id)
+
+    def _submit_job(self, path: Path, headers: dict[str, str]) -> requests.Response:
+        for attempt_index in range(3):
+            try:
+                with path.open("rb") as handle:
+                    response = requests.post(
+                        self._job_url,
+                        headers=headers,
+                        data={"model": self._model, "optionalPayload": json.dumps(PPOCRV6_OPTIONAL_PAYLOAD, ensure_ascii=False)},
+                        files={"file": handle},
+                        timeout=120,
+                    )
+            except requests.ConnectTimeout as exc:
+                if attempt_index == 2:
+                    raise OcrError(f"PP-OCRv6 job submit failed: {exc.__class__.__name__}") from exc
+            except requests.RequestException as exc:
+                raise OcrError(f"PP-OCRv6 job submit failed: {exc.__class__.__name__}") from exc
+            else:
+                if response.status_code == 200:
+                    return response
+                if response.status_code != 429 or attempt_index == 2:
+                    raise OcrError(f"PP-OCRv6 job submit failed with HTTP {response.status_code}")
+            time.sleep(1.5 * (2**attempt_index))
+        raise OcrError("PP-OCRv6 job submit failed without an HTTP response.")
 
     def _poll_result(self, job_id: str) -> dict[str, Any]:
         started = time.monotonic()
@@ -148,12 +161,7 @@ class PPOCRV6Client(OcrClient):
         while True:
             if time.monotonic() - started > self._timeout_seconds:
                 raise OcrError(f"PP-OCRv6 job timed out: {job_id}")
-            try:
-                response = requests.get(f"{self._job_url}/{job_id}", headers=headers, timeout=60)
-            except requests.RequestException as exc:
-                raise OcrError(f"PP-OCRv6 job polling failed: {exc.__class__.__name__}") from exc
-            if response.status_code != 200:
-                raise OcrError(f"PP-OCRv6 job polling failed with HTTP {response.status_code}")
+            response = self._poll_job(job_id, headers)
             data = _as_dict(_as_dict(response.json()).get("data"))
             state = str(data.get("state") or "")
             if state == "done":
@@ -166,6 +174,21 @@ class PPOCRV6Client(OcrClient):
             if state not in {"pending", "running"}:
                 raise OcrError(f"PP-OCRv6 job returned unknown state {state!r}: {job_id}")
             time.sleep(self._poll_interval_seconds)
+
+    def _poll_job(self, job_id: str, headers: dict[str, str]) -> requests.Response:
+        for attempt_index in range(3):
+            try:
+                response = requests.get(f"{self._job_url}/{job_id}", headers=headers, timeout=60)
+            except requests.RequestException as exc:
+                if attempt_index == 2:
+                    raise OcrError(f"PP-OCRv6 job polling failed: {exc.__class__.__name__}") from exc
+            else:
+                if response.status_code == 200:
+                    return response
+                if response.status_code not in PPOCRV6_RETRYABLE_POLL_STATUSES or attempt_index == 2:
+                    raise OcrError(f"PP-OCRv6 job polling failed with HTTP {response.status_code}")
+            time.sleep(1.5 * (2**attempt_index))
+        raise OcrError("PP-OCRv6 job polling failed without an HTTP response.")
 
 
 class RecordedOcrClient(OcrClient):

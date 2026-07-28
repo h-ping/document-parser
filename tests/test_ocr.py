@@ -202,6 +202,151 @@ class PPOCRV6NormalizeTests(unittest.TestCase):
         self.assertEqual(requests_calls[1]["url"], "https://pp.example.test/jobs/job-1")
         self.assertEqual(requests_calls[2]["url"], "https://result.example.test/ocr.jsonl")
 
+    def test_ppocrv6_submit_retries_only_safe_failures_and_reopens_file(self) -> None:
+        submit_calls = []
+        uploaded_payloads = []
+        sleeps = []
+        original_post = ocr_module.requests.post
+        original_sleep = ocr_module.time.sleep
+
+        class Response:
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+            def json(self):
+                return {"data": {"jobId": "job-safe-retry"}}
+
+        def fake_post(url, headers, data, files, timeout):
+            del url, headers, data, timeout
+            submit_calls.append(len(submit_calls) + 1)
+            uploaded_payloads.append(files["file"].read())
+            if len(submit_calls) == 1:
+                raise ocr_module.requests.ConnectTimeout("connect timeout")
+            if len(submit_calls) == 2:
+                return Response(429)
+            return Response(200)
+
+        try:
+            ocr_module.requests.post = fake_post
+            ocr_module.time.sleep = sleeps.append
+            client = PPOCRV6Client(RuntimeConfig(ppocrv6_api_key="pp-token"))
+            client._poll_result = lambda job_id: {"job_id": job_id}
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                image = Path(temp_dir) / "input.png"
+                image.write_bytes(b"complete-image")
+                result = client._recognize_file(image)
+        finally:
+            ocr_module.requests.post = original_post
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(result, {"job_id": "job-safe-retry"})
+        self.assertEqual(submit_calls, [1, 2, 3])
+        self.assertEqual(uploaded_payloads, [b"complete-image", b"complete-image", b"complete-image"])
+        self.assertEqual(sleeps, [1.5, 3.0])
+
+    def test_ppocrv6_submit_does_not_retry_ambiguous_read_timeout(self) -> None:
+        submit_calls = []
+        sleeps = []
+        original_post = ocr_module.requests.post
+        original_sleep = ocr_module.time.sleep
+
+        def fake_post(url, headers, data, files, timeout):
+            del url, headers, data, files, timeout
+            submit_calls.append(1)
+            raise ocr_module.requests.ReadTimeout("response lost after upload")
+
+        try:
+            ocr_module.requests.post = fake_post
+            ocr_module.time.sleep = sleeps.append
+            client = PPOCRV6Client(RuntimeConfig(ppocrv6_api_key="pp-token"))
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                image = Path(temp_dir) / "input.png"
+                image.write_bytes(b"complete-image")
+                with self.assertRaisesRegex(ocr_module.OcrError, "PP-OCRv6 job submit failed: ReadTimeout"):
+                    client._recognize_file(image)
+        finally:
+            ocr_module.requests.post = original_post
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(len(submit_calls), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_ppocrv6_poll_retries_transient_failures(self) -> None:
+        poll_calls = []
+        sleeps = []
+        original_get = ocr_module.requests.get
+        original_sleep = ocr_module.time.sleep
+
+        class Response:
+            def __init__(self, status_code: int, body: dict | None = None, content: bytes = b"") -> None:
+                self.status_code = status_code
+                self._body = body or {}
+                self.content = content
+
+            def json(self):
+                return self._body
+
+        def fake_get(url, headers=None, timeout=None):
+            del headers, timeout
+            if url.endswith("/job-retry"):
+                poll_calls.append(url)
+                if len(poll_calls) == 1:
+                    raise ocr_module.requests.ConnectionError("temporary disconnect")
+                if len(poll_calls) == 2:
+                    return Response(503)
+                return Response(200, {"data": {"state": "done", "resultUrl": {"jsonUrl": "https://result.example.test/ocr.jsonl"}}})
+            jsonl = b'{"result":{"ocrResults":[{"prunedResult":{"rec_texts":["recovered"]}}]}}\n'
+            return Response(200, content=jsonl)
+
+        try:
+            ocr_module.requests.get = fake_get
+            ocr_module.time.sleep = sleeps.append
+            client = PPOCRV6Client(
+                RuntimeConfig(ppocrv6_api_key="pp-token", ppocrv6_job_url="https://pp.example.test/jobs"),
+                poll_interval_seconds=5,
+            )
+            result = client._poll_result("job-retry")
+        finally:
+            ocr_module.requests.get = original_get
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(len(poll_calls), 3)
+        self.assertEqual(sleeps, [1.5, 3.0])
+        self.assertEqual(result["result"]["ocrResults"][0]["prunedResult"]["rec_texts"], ["recovered"])
+
+    def test_ppocrv6_poll_does_not_retry_auth_failure(self) -> None:
+        poll_calls = []
+        sleeps = []
+        original_get = ocr_module.requests.get
+        original_sleep = ocr_module.time.sleep
+
+        class Response:
+            status_code = 401
+
+        def fake_get(url, headers=None, timeout=None):
+            del url, headers, timeout
+            poll_calls.append(1)
+            return Response()
+
+        try:
+            ocr_module.requests.get = fake_get
+            ocr_module.time.sleep = sleeps.append
+            client = PPOCRV6Client(RuntimeConfig(ppocrv6_api_key="pp-token"))
+            with self.assertRaisesRegex(ocr_module.OcrError, "PP-OCRv6 job polling failed with HTTP 401"):
+                client._poll_result("job-auth")
+        finally:
+            ocr_module.requests.get = original_get
+            ocr_module.time.sleep = original_sleep
+
+        self.assertEqual(len(poll_calls), 1)
+        self.assertEqual(sleeps, [])
+
     def test_ppocrv6_result_download_retries_transient_failures(self) -> None:
         calls = []
         sleeps = []
