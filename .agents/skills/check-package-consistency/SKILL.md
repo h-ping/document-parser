@@ -7,12 +7,15 @@ description: Bootstrap and run the document-parser `check-package-consistency` C
 
 使用 `check-package-consistency` CLI 作为事实源。能运行 CLI 时，不要手工推断包装图文字是否匹配标准。
 
+当前流程是：标准模板 Excel 结构化 → PP-OCR + GLM-OCR hybrid 识别 → LLM 分片结构化包装图字段 → 规则最终一致性判定 → 客户 HTML 报告/COS 发布。LLM 只做包装图字段结构化，不决定通过/不通过，不做语义等价放行。
+
 ## 适用边界
 
 - 标准输入只接受标准模板 Excel：`.xlsx`。如果用户给 PDF/Word/TXT，说明当前 CLI 不直接支持，并要求提供模板 Excel；只有用户明确要求时才先做上游转换。
 - 包装设计图只接受 `.png`、`.jpg`、`.jpeg`。
 - CLI 一次处理一份标准模板和一张包装图。多组文件要分别运行，并使用独立输出目录。
 - 真实 OCR 默认使用 hybrid 双引擎，需要 `GLM_OCR_API_KEY`（也兼容 `ZAI_API_KEY`/`ZHIPUAI_API_KEY`）和 `PPOCRV6_API_KEY`（也兼容 `PPOCRV6_TOKEN`）。离线回归可用 fixture，不需要 OCR 密钥。
+- hybrid 默认策略：普通字段优先使用 PP-OCR 的精确文字和位置，GLM-OCR 提供版面/段落辅助；营养成分表以 GLM-OCR/LLM 表格结构为主，PP-OCR 只做辅助定位和冲突提示；条码优先使用条码 decoder，其次 PP-OCR/规则文本匹配。
 - 正式任务默认发布到腾讯云 COS，命令必须带 `--publish-cos`。只有用户明确要求本地报告、离线验证或测试发布包时，才使用 `--cos-dry-run` 或不发布。
 - 不要打印、记录或复述 OCR token 或 COS 密钥。不要把密钥放进命令参数、报告目录、日志或最终回复。
 - 以 CLI 生成的 JSON/HTML 产物为审核依据；LLM/VLM 只能辅助解释，不能替代 OCR 或比对结果。
@@ -128,7 +131,8 @@ check-package-consistency \
 
 6. 运行失败也要检查输出目录。优先读取 `failure_result.json` 和 `pipeline_summary.json`，不要只看 stderr。
 7. 运行成功后读取 `pipeline_summary.json`、`comparison_result.json`，并确认 `publish.public_url` 或 `key_artifacts.published_report_html` 存在。
-8. 最终回复只给审核结论、关键计数、COS 公开报告链接、失败阶段或需人工复核点。
+8. 解释结果时以规则判定为准：`critical_missing` 是标准有但包装图未找到，`critical_mismatch` 是严格归一化后文字仍不一致，`manual_review` 是证据不稳或标准/包装图字段要求复核。
+9. 最终回复只给审核结论、关键计数、COS 公开报告链接、失败阶段或需人工复核点。
 
 ## 本地报告例外
 
@@ -160,8 +164,11 @@ check-package-consistency \
 - `comparison_result.json`：字段级比对结果，含 `status`、`target_count`、`pass_count`、`critical_count`、`manual_review_count`、`info_extra_text_count`。
 - `package_ppocr_lines.json`：PP-OCR 识别行，用于普通字段和精确位置。
 - `package_glm_lines.json`：GLM-OCR 识别行，用于版面结构和营养表。
+- `package_llm_structure_chunks.json`：标准字段驱动的 LLM 分片结构化输入摘要，用于确认没有一次性塞入全量 OCR。
+- `package_structured_items.json`：LLM 基于 OCR evidence 生成的包装图结构化字段。字段必须引用已有 GLM/PP source id，不能创造 OCR 中不存在的文字。
 - `package_fusion_evidence.json`：双 OCR 融合证据来源。
 - `package_fusion_quality_report.json`：双 OCR 融合质量提示。
+- `package_fusion_structure_quality_report.json`：包装图结构化质量提示，含 evidence 校验、拒绝字段和需复核原因。
 - `pipeline_summary.json`：运行 ID、输入文件、阶段状态、耗时、关键产物路径。
 - `pipeline_summary.json.publish.public_url`：COS 发布后的公开报告链接。
 - `pipeline_summary.json.key_artifacts.published_report_html`：客户可打开的公开 HTML 报告链接。
@@ -177,6 +184,17 @@ check-package-consistency \
 - `critical_mismatch`：标准模板文字和包装图文字不一致。
 - `manual_review`：需要人工复核。
 - `info_extra_text`：包装图多出文字提示，默认不是严重问题。
+
+匹配规则要点：
+
+- 最终裁判只由规则负责。LLM 输出即使看起来合理，也必须有合法 evidence，且经过规则严格比对。
+- 字段内容会先做受控归一化：全半角、大小写、空格、冒号、括号、`×/x/*`、`％/%`、尾部句号/分号/逗号差异可归一；长文本可忽略逗号、顿号、分号、句号、换行等分隔符差异。
+- 数字、单位、百分比、标准号、条码核心字符不能被删除或语义改写。数值不同、单位不同、标准号不同仍判不一致。
+- 前缀可以按同一 `semantic_key` 的受控别名归一，例如 `产品标准号/产品标准代号`、`配料/配料表`、`贮存条件/储存条件/保存条件`。普通 OCR 候选缺少字段前缀时不能自动通过。
+- 结构化字段如果文本缺前缀，但 `label` 与同一字段的受控前缀别名一致，且 source evidence 合法，可以用 label 补足字段前缀参与规则比对。
+- 条码字段允许包装图文字带 `条码：`、`商品条码：`、`外箱条码：` 前缀；规则只比较条码数字核心。数字不同仍不通过。
+- 营养表标题、表头、行、脚注拆分比对。营养表行优先采用 GLM-OCR/LLM 表格结构；如果 PP-OCR 与 GLM 表格冲突，GLM 表格一致时仍可通过并记录质量标记。
+- 包装图多印文字默认只作为 `info_extra_text` 提示，不作为严重问题。
 
 ## 失败处理
 
