@@ -72,6 +72,134 @@ class ImageCompareTests(unittest.TestCase):
             normalize_compare_text("粽粽有礼粽子礼盒"),
         )
 
+    def test_field_match_ignores_tail_punctuation_and_records_flag(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_0001", "product.name", "产品名称", "产品 名称 ：粽子。")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "产品名称:粽子", 0.1, 0.1, 0.25, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("punctuation_insensitive_match", result["match_quality_flags"])
+
+    def test_field_match_allows_same_semantic_prefix_alias(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item("std_0001", "product.standard_code", "产品标准号", "产品标准号：Q/SCQC 0010S")
+            ],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "产品标准代号: Q/SCQC 0010S。", 0.1, 0.1, 0.45, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("prefix_normalized_match", result["match_quality_flags"])
+        self.assertIn("punctuation_insensitive_match", result["match_quality_flags"])
+
+    def test_long_text_match_ignores_separator_differences_with_prefix_alias(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item("std_0001", "product.ingredients", "配料", "配料：水；白砂糖；柠檬酸。")
+            ],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "配料表：水，白砂糖、柠檬酸", 0.1, 0.1, 0.55, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("prefix_normalized_match", result["match_quality_flags"])
+        self.assertIn("separator_insensitive_match", result["match_quality_flags"])
+
+    def test_prefix_normalization_still_rejects_missing_prefix_and_value_changes(self) -> None:
+        missing_prefix_artifacts = {
+            "standard_items": [_standard_item("std_0001", "product.name", "产品名称", "产品名称：粽子")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        missing_prefix = compare_standard_to_ocr(
+            missing_prefix_artifacts,
+            [_ocr_line("ocr_0001", "粽子", 0.1, 0.1, 0.2, 0.12)],
+            PACKAGE_IMAGE,
+        )["comparison_result"]["results"][0]
+
+        code_diff_artifacts = {
+            "standard_items": [
+                _standard_item("std_0001", "product.standard_code", "产品标准号", "产品标准号：Q/SCQC 0010S")
+            ],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        code_diff = compare_standard_to_ocr(
+            code_diff_artifacts,
+            [_ocr_line("ocr_0001", "产品标准代号：Q/SCQC 0038S", 0.1, 0.1, 0.45, 0.12)],
+            PACKAGE_IMAGE,
+        )["comparison_result"]["results"][0]
+
+        number_diff_artifacts = {
+            "standard_items": [_standard_item("std_0001", "custom.symbol_text", "含量", "含量：12.50毫克")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        number_diff = compare_standard_to_ocr(
+            number_diff_artifacts,
+            [_ocr_line("ocr_0001", "含量：1250毫克", 0.1, 0.1, 0.3, 0.12)],
+            PACKAGE_IMAGE,
+        )["comparison_result"]["results"][0]
+
+        self.assertNotEqual(missing_prefix["status"], "pass")
+        self.assertEqual(code_diff["status"], "critical_mismatch")
+        self.assertNotEqual(number_diff["status"], "pass")
+
+    def test_structured_field_label_can_supply_prefix_for_same_semantic_field(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item("std_0001", "product.standard_code", "产品标准号", "产品标准号：Q/SCQC 0010S")
+            ],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "Q/SCQC 0010S", 0.1, 0.1, 0.35, 0.12)]
+        package_structure = {
+            "enabled": True,
+            "fields": [
+                {
+                    "semantic_key": "product.standard_code",
+                    "label": "产品标准代号",
+                    "text": "Q/SCQC 0010S",
+                    "source_ocr_line_ids": ["ocr_0001"],
+                    "bbox_normalized": {"x1": 0.1, "y1": 0.1, "x2": 0.35, "y2": 0.12},
+                    "confidence": 0.99,
+                    "review_required": False,
+                    "metadata": {"source_provider": "glm", "source_confidence": 0.99},
+                }
+            ],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            lines,
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("prefix_normalized_match", result["match_quality_flags"])
+
     def test_html_renders_bbox_when_line_contains_dataclass_bbox(self) -> None:
         html = build_image_compare_html(
             output_path=Path("/tmp/result_preview.html"),
@@ -272,6 +400,66 @@ class ImageCompareTests(unittest.TestCase):
         row = _result_for(results, target_type="nutrition_row", table_id="nutrition_n1", row_key="能量")
         self.assertEqual(row["reason"], "nutrition_row_structured_match")
 
+    def test_nutrition_review_structured_title_header_can_fallback_to_strict_ocr_match(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "table_type": "nutrition_facts",
+                    "title": "营养成分表",
+                    "columns": [
+                        {"column_id": "item", "name": "项目"},
+                        {"column_id": "amount", "name": "每100克"},
+                        {"column_id": "nrv", "name": "营养素参考值%"},
+                    ],
+                    "rows": [],
+                    "footnotes": [],
+                }
+            ],
+        }
+        lines = [
+            _ocr_line("ocr_0001", "营养成分表", 0.1, 0.1, 0.2, 0.12),
+            _ocr_line("ocr_0002", "项目", 0.1, 0.13, 0.15, 0.145),
+            _ocr_line("ocr_0003", "每100克", 0.22, 0.13, 0.32, 0.145),
+            _ocr_line("ocr_0004", "营养素参考值%", 0.42, 0.13, 0.55, 0.145),
+        ]
+        package_structure = {
+            "enabled": True,
+            "nutrition_tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "title": "营养成分表",
+                    "columns": [
+                        {"name": "项目"},
+                        {"name": "每100克"},
+                        {"name": "营养素参考值%"},
+                    ],
+                    "source_ocr_line_ids": ["ocr_0001"],
+                    "bbox_normalized": {"x1": 0.1, "y1": 0.1, "x2": 0.55, "y2": 0.145},
+                    "confidence": 0.8,
+                    "review_required": True,
+                }
+            ],
+        }
+
+        results = compare_standard_to_ocr(
+            artifacts,
+            lines,
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"]
+
+        title = _result_for(results, target_type="nutrition_title", table_id="nutrition_n1")
+        header = _result_for(results, target_type="nutrition_header", table_id="nutrition_n1")
+        self.assertEqual(title["status"], "pass")
+        self.assertEqual(header["status"], "pass")
+        self.assertIn("llm_structured_item_review_required", title["match_quality_flags"])
+        self.assertIn("llm_structured_item_review_required", header["match_quality_flags"])
+
     def test_barcode_missing_reports_decoder_status(self) -> None:
         artifacts = {
             "standard_items": [_standard_item("std_0001", "barcode.commodity", "条码", "6900000000000")],
@@ -289,6 +477,33 @@ class ImageCompareTests(unittest.TestCase):
         self.assertIn(result["reason"], {"barcode_decoder_unavailable", "barcode_not_decoded"})
         self.assertIn(result["reason"], result["match_quality_flags"])
 
+    def test_barcode_ocr_line_can_include_barcode_prefix(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_0001", "barcode.commodity", "条码", "6926475 208328")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "条码：6926475 208328", 0.1, 0.1, 0.35, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("barcode_text_normalized_match", result["match_quality_flags"])
+
+    def test_barcode_ocr_line_with_different_digits_still_fails(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_0001", "barcode.commodity", "条码", "6926475 208328")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "条码：6926475 208329", 0.1, 0.1, 0.35, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertNotEqual(result["status"], "pass")
+
     def test_compare_package_image_cli_with_zongzi_fixture(self) -> None:
         if not STANDARD_DIR.exists():
             self.skipTest("standard fixture output directory is not available")
@@ -298,6 +513,9 @@ class ImageCompareTests(unittest.TestCase):
             env.pop("GLM_OCR_API_KEY", None)
             env.pop("ZAI_API_KEY", None)
             env.pop("ZHIPUAI_API_KEY", None)
+            env.pop("LLM_API_KEY", None)
+            env.pop("LLM_BASE_URL", None)
+            env.pop("LLM_MODEL", None)
             env["PYTHONPATH"] = str(ROOT / "src")
             completed = subprocess.run(
                 [
@@ -309,6 +527,8 @@ class ImageCompareTests(unittest.TestCase):
                     str(PACKAGE_IMAGE),
                     "--ocr-fixture",
                     str(OCR_FIXTURE),
+                    "--llm-mode",
+                    "disabled",
                     "--output-dir",
                     str(output_dir),
                 ],
@@ -335,10 +555,13 @@ class ImageCompareTests(unittest.TestCase):
                 "unmatched_print_text.json",
                 "package_ocr_quality_report.json",
                 "package_glm_blocks.json",
+                "package_ppocr_blocks.json",
                 "package_llm_structure_input.json",
+                "package_llm_structure_chunks.json",
                 "package_llm_structure_output.json",
                 "package_structured_items.json",
                 "package_structure_quality_report.json",
+                "package_fusion_structure_quality_report.json",
                 "result_preview.html",
                 "artifacts/index.json",
             ):

@@ -19,11 +19,56 @@ LONG_TEXT_KEYS = {
     "product.warning",
     "custom.symbol_text",
 }
+LONG_TEXT_SEMANTIC_ALIASES = {
+    "product.ingredients": {
+        "ingredients",
+        "product.ingredients",
+        "content_item.ingredients",
+    },
+    "product.directions": {
+        "directions",
+        "preparation_method",
+        "product.directions",
+    },
+    "product.storage_condition": {
+        "product.storage",
+        "product.storage_condition",
+        "storage_condition",
+    },
+    "product.warning": {
+        "custom.warning",
+        "product.warning",
+        "warning",
+    },
+    "custom.allergen_notice": {
+        "allergen_notice",
+        "custom.allergen_notice",
+    },
+}
+PREFIX_ALIASES_BY_SEMANTIC_KEY = {
+    "product.name": ("产品名称", "品名"),
+    "product.ingredients": ("配料", "配料表"),
+    "content_item.ingredients": ("配料", "配料表", "配料原文"),
+    "product.storage_condition": ("贮存条件", "储存条件", "保存条件"),
+    "product.directions": ("食用方法", "冲调方法", "食用/冲调方法"),
+    "product.standard_code": ("产品标准号", "产品标准代号", "产品标准编号"),
+    "custom.allergen_notice": ("致敏原提示", "致敏物质提示", "致敏物提示"),
+}
+ENTERPRISE_PREFIX_ALIASES_BY_FIELD = {
+    "name": ("企业名称", "生产者", "生产商", "生产企业", "委托方", "受托方", "被委托方"),
+    "address": ("地址", "公司地址", "生产地址"),
+    "origin": ("产地", "生产地"),
+    "license_number": ("许可证/备案号", "食品生产许可证编号", "食品生产许可证", "生产许可证编号"),
+    "contact": ("联系方式", "电话", "客户服务热线", "消费者服务电话"),
+    "postal_code": ("邮政编码", "邮编"),
+    "website": ("网站", "网址"),
+}
 KNOWN_FIELD_PREFIXES = (
     "配料",
     "配料表",
     "致敏物质提示",
     "致敏原提示",
+    "致敏物提示",
     "贮存条件",
     "保质期",
     "生产日期",
@@ -681,6 +726,8 @@ def _package_structure_index(package_structure: dict[str, Any] | None) -> dict[s
                     "row_key": field_dict.get("row_key"),
                     "source_ids": field_dict.get("source_ids", []),
                     "confidence": field_dict.get("confidence"),
+                    "source_provider": _as_dict(field_dict.get("metadata")).get("source_provider"),
+                    "source_confidence": _as_dict(field_dict.get("metadata")).get("source_confidence"),
                     "review_required": bool(field_dict.get("review_required")),
                 },
             )
@@ -705,16 +752,26 @@ def _compare_structured_target(target: dict[str, Any], structured_index: dict[st
     expected_norm = _match_normalize_for_target(target, str(target.get("expected_text") or ""))
     long_text = _is_long_target(target)
     exact = [
-        _with_score(candidate, 1.0, "package_structured_text_match")
+        _with_score(candidate, 1.0, _match_reason_for_candidate(target, candidate))
         for candidate in candidates
         if not _structured_candidate_requires_review(candidate)
-        and _candidate_matches_for_target(target, expected_norm, _match_normalize_for_target(target, candidate.text), long_text)
+        and _candidate_matches_for_target(
+            target,
+            expected_norm,
+            _match_normalize_for_target(target, _candidate_text_for_match(target, candidate)),
+            long_text,
+        )
     ]
     if exact:
-        return _result(target, "pass", "package_structured_text_match", _best_candidate(exact)), exact[:5]
+        best = _best_candidate(exact)
+        return _result(target, "pass", "package_structured_text_match", best), exact[:5]
 
     scored = [
-        _with_score(candidate, _candidate_score(expected_norm, _match_normalize_for_target(target, candidate.text), long_text), candidate.reason)
+        _with_score(
+            candidate,
+            _candidate_score(expected_norm, _match_normalize_for_target(target, _candidate_text_for_match(target, candidate)), long_text),
+            candidate.reason,
+        )
         for candidate in candidates
     ]
     scored = sorted(scored, key=lambda item: item.score, reverse=True)
@@ -738,6 +795,10 @@ def _compare_with_structured_preference(
     if target_type.startswith("nutrition_"):
         if structured_result.get("status") == "pass" and ppocr_result.get("status") != "pass":
             structured_result = _with_result_flag(structured_result, "ppocr_glm_table_conflict")
+        if structured_result.get("status") == "manual_review" and ppocr_result.get("status") == "pass":
+            ppocr_result = _with_result_flag(ppocr_result, "llm_structured_item_review_required")
+            ppocr_result = _with_result_flag(ppocr_result, "final_decision_by_rules")
+            return ppocr_result, target_candidates
         return structured_result, target_candidates
 
     if structured_result.get("status") == "pass":
@@ -788,23 +849,42 @@ def _structured_candidates_for_target(target: dict[str, Any], structured_index: 
 
 
 def _structured_field_candidates_for_target(target: dict[str, Any], fields: list[Any]) -> list[CompareCandidate]:
-    semantic_key = str(target.get("semantic_key") or "")
-    group_id = str(target.get("group_id") or "")
-    category = str(target.get("category") or "")
     matches = []
     for field in fields:
         if not isinstance(field, CompareCandidate):
             continue
         metadata = _as_dict(field.metadata)
-        if str(metadata.get("semantic_key") or "") != semantic_key:
+        if not _structured_semantic_matches_target(target, metadata):
             continue
         if _requires_structured_label_scope(target) and not _structured_label_matches_target(target, metadata):
             continue
-        candidate_group_id = str(metadata.get("group_id") or "")
-        if group_id and category in {"content", "enterprise"} and candidate_group_id != group_id:
+        if not _structured_group_matches_target(target, metadata):
             continue
-        matches.append(field)
+        matches.append(_trim_structured_candidate_for_target(target, field))
     return matches
+
+
+def _structured_semantic_matches_target(target: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    semantic_key = str(target.get("semantic_key") or "")
+    candidate_key = str(metadata.get("semantic_key") or "")
+    if candidate_key == semantic_key:
+        return True
+    if not _is_long_target(target):
+        return False
+    return candidate_key in LONG_TEXT_SEMANTIC_ALIASES.get(semantic_key, set())
+
+
+def _structured_group_matches_target(target: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    group_id = str(target.get("group_id") or "")
+    if not group_id:
+        return True
+    candidate_group_id = str(metadata.get("group_id") or "")
+    category = str(target.get("category") or "")
+    if category in {"content", "enterprise"}:
+        return candidate_group_id == group_id
+    if not candidate_group_id or candidate_group_id == group_id:
+        return True
+    return category == "main" and group_id in {"product", "product_001"} and candidate_group_id in {"product", "product_001"}
 
 
 def _requires_structured_label_scope(target: dict[str, Any]) -> bool:
@@ -817,6 +897,44 @@ def _structured_label_matches_target(target: dict[str, Any], metadata: dict[str,
     return bool(target_label and candidate_label and target_label == candidate_label)
 
 
+def _trim_structured_candidate_for_target(target: dict[str, Any], candidate: CompareCandidate) -> CompareCandidate:
+    if not _is_long_target(target):
+        return candidate
+    spans = _known_prefix_spans(candidate.text)
+    if len(spans) < 2:
+        return candidate
+    expected_norm = _match_normalize_for_target(target, str(target.get("expected_text") or ""))
+    expected_prefix = _expected_prefix(expected_norm)
+    label_norm = normalize_compare_text(str(target.get("label") or ""))
+    for index, (start, prefix) in enumerate(spans):
+        if not _prefix_matches_long_text_target(prefix, expected_prefix, label_norm):
+            continue
+        end = spans[index + 1][0] if index + 1 < len(spans) else len(candidate.text)
+        text = candidate.text[start:end].strip()
+        if not text or text == candidate.text:
+            return candidate
+        return CompareCandidate(
+            candidate_id=candidate.candidate_id,
+            candidate_type=candidate.candidate_type,
+            text=text,
+            normalized_text=normalize_compare_text(text),
+            source_ocr_line_ids=candidate.source_ocr_line_ids,
+            bbox_normalized=candidate.bbox_normalized,
+            score=candidate.score,
+            reason=f"{candidate.reason}; trimmed at next field prefix",
+            region_id=candidate.region_id,
+            metadata=candidate.metadata,
+        )
+    return candidate
+
+
+def _prefix_matches_long_text_target(prefix: str, expected_prefix: str, label_norm: str) -> bool:
+    prefix_norm = normalize_compare_text(prefix)
+    if expected_prefix and (prefix_norm == expected_prefix or prefix_norm in expected_prefix or expected_prefix in prefix_norm):
+        return True
+    return bool(label_norm and (prefix_norm == label_norm or prefix_norm in label_norm or label_norm in prefix_norm))
+
+
 def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: list[Any]) -> list[CompareCandidate]:
     table_id = str(target.get("table_id") or "")
     target_type = str(target.get("target_type") or "")
@@ -824,7 +942,7 @@ def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: 
     candidates = []
     for table_index, table in enumerate(tables, start=1):
         table_dict = _as_dict(table)
-        if table_id and str(table_dict.get("table_id") or "") != table_id:
+        if table_id and str(table_dict.get("table_id") or "") != table_id and not _allow_cross_id_nutrition_candidate(target, table_dict):
             continue
         table_source_ids = [str(line_id) for line_id in _as_list(table_dict.get("source_ocr_line_ids"))]
         if target_type == "nutrition_title":
@@ -836,15 +954,25 @@ def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: 
         elif target_type == "nutrition_row":
             for row_index, row in enumerate(_as_list(table_dict.get("rows")), start=1):
                 row_dict = _as_dict(row)
-                if _nutrition_row_key_match_text(str(row_dict.get("row_key") or "")) != row_key:
+                if row_key not in _nutrition_row_match_keys(row_dict):
                     continue
-                text = " ".join(str(cell) for cell in _as_list(row_dict.get("cells")) if str(cell).strip())
+                text = " ".join(cell_text for cell_text in (_nutrition_cell_text(cell) for cell in _as_list(row_dict.get("cells"))) if cell_text)
                 candidates.append(_structured_text_candidate(63000 + table_index * 100 + row_index, "package_structured_nutrition_row", text, [str(line_id) for line_id in _as_list(row_dict.get("source_ocr_line_ids"))], row_dict, table_id, row_dict))
         elif target_type == "nutrition_footnote":
             for footnote_index, footnote in enumerate(_as_list(table_dict.get("footnotes")), start=1):
                 footnote_dict = _as_dict(footnote)
                 candidates.append(_structured_text_candidate(64000 + table_index * 100 + footnote_index, "package_structured_nutrition_footnote", str(footnote_dict.get("text") or ""), [str(line_id) for line_id in _as_list(footnote_dict.get("source_ocr_line_ids"))], footnote_dict, table_id, footnote_dict))
     return candidates
+
+
+def _allow_cross_id_nutrition_candidate(target: dict[str, Any], table: dict[str, Any]) -> bool:
+    if str(target.get("target_type") or "") != "nutrition_row":
+        return False
+    row_key = _nutrition_row_key_match_text(str(target.get("row_key") or ""))
+    return any(
+        row_key in _nutrition_row_match_keys(_as_dict(row))
+        for row in _as_list(table.get("rows"))
+    )
 
 
 def _nutrition_column_text(column: Any) -> str:
@@ -854,6 +982,34 @@ def _nutrition_column_text(column: Any) -> str:
     text = str(column or "").strip()
     match = re.search(r"['\"]name['\"]\s*:\s*['\"]([^'\"]+)['\"]", text)
     return match.group(1).strip() if match else text
+
+
+def _nutrition_row_match_keys(row: dict[str, Any]) -> set[str]:
+    keys = {_nutrition_row_key_match_text(str(row.get("row_key") or ""))}
+    cells = _as_list(row.get("cells"))
+    if cells:
+        keys.add(_nutrition_row_key_match_text(_nutrition_cell_text(cells[0])))
+    return {key for key in keys if key and not _is_generic_nutrition_row_key(key)}
+
+
+def _nutrition_cell_text(cell: Any) -> str:
+    cell_dict = _as_dict(cell)
+    if cell_dict:
+        return str(
+            cell_dict.get("text")
+            or cell_dict.get("raw_value")
+            or cell_dict.get("normalized_value")
+            or cell_dict.get("value")
+            or cell_dict.get("name")
+            or ""
+        ).strip()
+    text = str(cell or "").strip()
+    dict_text_match = re.search(r"['\"](?:text|raw_value|normalized_value|value|name)['\"]\s*:\s*['\"]([^'\"]+)['\"]", text)
+    return dict_text_match.group(1).strip() if dict_text_match else text
+
+
+def _is_generic_nutrition_row_key(row_key: str) -> bool:
+    return bool(re.fullmatch(r"(?:row)?[_-]?\d+|n\d+", row_key))
 
 
 def _nutrition_row_key_match_text(row_key: str) -> str:
@@ -892,11 +1048,26 @@ def _structured_candidate_requires_review(candidate: CompareCandidate) -> bool:
         return bool(metadata.get("review_required"))
     if not candidate.source_ocr_line_ids:
         return True
+    source_provider = str(metadata.get("source_provider") or "")
+    threshold = 0.85 if source_provider in {"ppocr", "fusion"} else 0.8
     confidence = metadata.get("confidence")
+    source_confidence = metadata.get("source_confidence")
+    confidence_values = []
+    if source_confidence is not None:
+        try:
+            confidence_values.append(float(source_confidence))
+        except (TypeError, ValueError):
+            pass
     try:
-        low_confidence = float(confidence) < 0.8
+        confidence_value = float(confidence)
     except (TypeError, ValueError):
+        confidence_value = 0.0
+    if confidence_value > 0:
+        confidence_values.append(confidence_value)
+    if not confidence_values:
         low_confidence = True
+    else:
+        low_confidence = min(confidence_values) < threshold
     return bool(metadata.get("review_required")) or low_confidence
 
 
@@ -1049,9 +1220,7 @@ def _compare_field_target(
     for candidate in pool:
         candidate_norm = _match_normalize_for_target(target, candidate.text)
         if _candidate_matches_for_target(target, expected_norm, candidate_norm, long_text):
-            reason = "normalized_text_exact_match"
-            if candidate_norm != candidate.normalized_text:
-                reason = "separator_insensitive_normalized_match"
+            reason = _match_reason_for_candidate(target, candidate)
             exact.append(_with_score(candidate, 1.0, reason))
     if exact:
         selected = _best_candidate(exact)
@@ -1575,7 +1744,7 @@ def _candidate_matches(expected_norm: str, candidate_norm: str, long_text: bool)
     if not expected_norm:
         return False
     if long_text:
-        return expected_norm == candidate_norm or expected_norm in candidate_norm
+        return expected_norm == candidate_norm
     return expected_norm == candidate_norm
 
 
@@ -1622,11 +1791,44 @@ def _candidate_score(expected_norm: str, candidate_norm: str, long_text: bool) -
         return 0.0
     if expected_norm == candidate_norm:
         return 1.0
+    if long_text:
+        return _long_text_candidate_score(expected_norm, candidate_norm)
     if expected_norm in candidate_norm:
-        return 0.88 if long_text else 0.65
+        return 0.65
     if candidate_norm in expected_norm:
-        return 0.7 if long_text else 0.45
+        return 0.45
     return difflib.SequenceMatcher(None, expected_norm, candidate_norm).ratio()
+
+
+def _long_text_candidate_score(expected_norm: str, candidate_norm: str) -> float:
+    sequence_score = difflib.SequenceMatcher(None, expected_norm, candidate_norm).ratio()
+    coverage_score = _long_text_token_coverage_score(expected_norm, candidate_norm)
+    score = max(sequence_score, coverage_score)
+    if expected_norm in candidate_norm:
+        score = max(score, 0.82)
+    if candidate_norm in expected_norm:
+        score = min(score, 0.68)
+    if len(candidate_norm) < len(expected_norm) * 0.55:
+        score = min(score, 0.68)
+    return score
+
+
+def _long_text_token_coverage_score(expected_norm: str, candidate_norm: str) -> float:
+    tokens = _long_text_tokens(expected_norm)
+    if not tokens:
+        return 0.0
+    matched = sum(len(token) for token in tokens if token in candidate_norm)
+    total = sum(len(token) for token in tokens)
+    return 0.25 + 0.65 * (matched / total)
+
+
+def _long_text_tokens(normalized_text: str) -> list[str]:
+    _, value = _prefix_parts(normalized_text)
+    return [
+        token
+        for token in re.split(r"[,;:.。；，、()（）\s]+", value)
+        if len(token) >= 2 and not token.isdigit()
+    ]
 
 
 def _is_long_target(target: dict[str, Any]) -> bool:
@@ -1640,22 +1842,136 @@ def _is_barcode_target(target: dict[str, Any]) -> bool:
 
 
 def _match_normalize_for_target(target: dict[str, Any], text: str) -> str:
+    if _is_barcode_target(target):
+        return _normalize_barcode_text(text)
     normalized = normalize_compare_text(text)
+    prefix, value = _prefix_parts(normalized)
+    if prefix:
+        prefix = _canonical_prefix_for_target(target, prefix)
+    value = _strip_terminal_field_punctuation(value)
     if _allows_separator_insensitive_match(target):
-        prefix, value = _prefix_parts(normalized)
         value = _strip_long_text_separators(value)
-        return f"{prefix}:{value}" if prefix else value
-    return normalized
+    return f"{prefix}:{value}" if prefix else value
+
+
+def _normalize_barcode_text(text: str) -> str:
+    normalized = normalize_compare_text(text)
+    prefix, value = _prefix_parts(normalized)
+    if prefix in {"条码", "商品条码", "外箱条码", "barcode"}:
+        normalized = value
+    return re.sub(r"\D+", "", normalized)
 
 
 def _allows_separator_insensitive_match(target: dict[str, Any]) -> bool:
     semantic_key = str(target.get("semantic_key") or "")
-    return semantic_key.endswith(".ingredients") or semantic_key in {"product.warning", "product.directions"}
+    return semantic_key.endswith(".ingredients") or semantic_key in {
+        "product.warning",
+        "product.directions",
+        "custom.allergen_notice",
+    }
 
 
 def _strip_long_text_separators(value: str) -> str:
     value = re.sub(r"(?<!\d)[,.;](?!\d)", "", value)
     return value
+
+
+def _strip_terminal_field_punctuation(value: str) -> str:
+    return re.sub(r"[,.;]+$", "", value)
+
+
+def _canonical_prefix_for_target(target: dict[str, Any], prefix: str) -> str:
+    aliases = _prefix_aliases_for_target(target)
+    if prefix in aliases:
+        return aliases[0]
+    return prefix
+
+
+def _prefix_aliases_for_target(target: dict[str, Any]) -> tuple[str, ...]:
+    semantic_key = str(target.get("semantic_key") or "")
+    aliases = PREFIX_ALIASES_BY_SEMANTIC_KEY.get(semantic_key)
+    if aliases is None and semantic_key.startswith(("principal.", "manufacturer.", "distributor.", "enterprise.")):
+        field_name = semantic_key.rsplit(".", 1)[-1]
+        aliases = ENTERPRISE_PREFIX_ALIASES_BY_FIELD.get(field_name)
+    if aliases is None:
+        return ()
+    normalized_aliases = []
+    for alias in aliases:
+        normalized = normalize_compare_text(alias)
+        if normalized and normalized not in normalized_aliases:
+            normalized_aliases.append(normalized)
+    return tuple(normalized_aliases)
+
+
+def _candidate_text_for_match(target: dict[str, Any], candidate: CompareCandidate) -> str:
+    if candidate.candidate_type != "package_structured_field":
+        return candidate.text
+    candidate_prefix, _ = _prefix_parts(normalize_compare_text(candidate.text))
+    if candidate_prefix:
+        return candidate.text
+    metadata = _as_dict(candidate.metadata)
+    label = str(metadata.get("label") or "")
+    label_prefix_raw = normalize_compare_text(label)
+    label_prefix = _canonical_prefix_for_target(target, label_prefix_raw)
+    expected_raw = normalize_compare_text(str(target.get("expected_text") or ""))
+    expected_prefix_raw, _ = _prefix_parts(expected_raw)
+    expected_prefix, _ = _prefix_parts(_match_normalize_for_target(target, str(target.get("expected_text") or "")))
+    if expected_prefix and label_prefix_raw != expected_prefix_raw and label_prefix == expected_prefix:
+        return f"{label}:{candidate.text}"
+    return candidate.text
+
+
+def _match_reason_for_candidate(target: dict[str, Any], candidate: CompareCandidate) -> str:
+    flags = _candidate_normalization_flags(target, candidate)
+    if "separator_insensitive_match" in flags:
+        return "separator_insensitive_normalized_match"
+    if "prefix_normalized_match" in flags:
+        return "prefix_normalized_match"
+    if "punctuation_insensitive_match" in flags:
+        return "punctuation_insensitive_normalized_match"
+    return "normalized_text_exact_match"
+
+
+def _candidate_normalization_flags(target: dict[str, Any], candidate: CompareCandidate) -> list[str]:
+    if _is_barcode_target(target):
+        expected_raw = normalize_compare_text(str(target.get("expected_text") or ""))
+        candidate_raw = normalize_compare_text(candidate.text)
+        expected_match = _match_normalize_for_target(target, str(target.get("expected_text") or ""))
+        candidate_match = _match_normalize_for_target(target, candidate.text)
+        if expected_match == candidate_match and (expected_raw != expected_match or candidate_raw != candidate_match):
+            return ["barcode_text_normalized_match"]
+        return []
+
+    expected_raw = normalize_compare_text(str(target.get("expected_text") or ""))
+    candidate_raw = normalize_compare_text(_candidate_text_for_match(target, candidate))
+    flags: list[str] = []
+
+    expected_prefix_raw, expected_value_raw = _prefix_parts(expected_raw)
+    candidate_prefix_raw, candidate_value_raw = _prefix_parts(candidate_raw)
+    expected_prefix_match, _ = _prefix_parts(_match_normalize_for_target(target, str(target.get("expected_text") or "")))
+    candidate_prefix_match, _ = _prefix_parts(_match_normalize_for_target(target, _candidate_text_for_match(target, candidate)))
+    if (
+        expected_prefix_raw
+        and candidate_prefix_raw
+        and expected_prefix_raw != candidate_prefix_raw
+        and expected_prefix_match
+        and expected_prefix_match == candidate_prefix_match
+    ):
+        flags.append("prefix_normalized_match")
+
+    expected_without_tail = _strip_terminal_field_punctuation(expected_value_raw)
+    candidate_without_tail = _strip_terminal_field_punctuation(candidate_value_raw)
+    if expected_without_tail != expected_value_raw or candidate_without_tail != candidate_value_raw:
+        flags.append("punctuation_insensitive_match")
+
+    if _allows_separator_insensitive_match(target):
+        if (
+            _strip_long_text_separators(expected_without_tail) != expected_without_tail
+            or _strip_long_text_separators(candidate_without_tail) != candidate_without_tail
+        ):
+            flags.append("separator_insensitive_match")
+
+    return flags
 
 
 def _prefix_parts(normalized_text: str) -> tuple[str, str]:
@@ -1800,11 +2116,21 @@ def _match_quality_flags(target: dict[str, Any], status: str, reason: str, candi
         if "nutrition" in candidate.candidate_type:
             flags.append("glm_structured_table_match")
         elif candidate.candidate_type == "package_structured_field" and status == "pass":
-            flags.append("glm_structured_field_match")
+            provider = str(_as_dict(candidate.metadata).get("source_provider") or "")
+            if provider == "ppocr":
+                flags.append("ppocr_structured_field_match")
+            elif provider == "fusion":
+                flags.append("fusion_structured_field_match")
+            else:
+                flags.append("glm_structured_field_match")
         if _structured_candidate_requires_review(candidate):
             flags.append("llm_structured_item_review_required")
     if candidate and "separator_insensitive" in candidate.reason:
         flags.append("separator_insensitive_match")
+    if status == "pass" and candidate:
+        for flag in _candidate_normalization_flags(target, candidate):
+            if flag not in flags:
+                flags.append(flag)
     if candidate and _candidate_has_noise(candidate):
         flags.append("candidate_contamination")
     if "sugar_sodium" in reason or (candidate and "糖钠" in normalize_compare_text(candidate.text)):

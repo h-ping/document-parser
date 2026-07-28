@@ -97,6 +97,8 @@ class ConsistencyCliTests(unittest.TestCase):
                 str(PACKAGE_IMAGE),
                 "--ocr-fixture",
                 str(OCR_FIXTURE),
+                "--llm-mode",
+                "disabled",
                 "--output-dir",
                 str(output_dir),
             )
@@ -113,6 +115,9 @@ class ConsistencyCliTests(unittest.TestCase):
                 "package_glm_lines.json",
                 "package_fusion_evidence.json",
                 "package_fusion_quality_report.json",
+                "package_ppocr_blocks.json",
+                "package_llm_structure_chunks.json",
+                "package_fusion_structure_quality_report.json",
                 "package_ocr_quality_report.json",
                 "package_glm_blocks.json",
                 "package_llm_structure_input.json",
@@ -194,6 +199,8 @@ class ConsistencyCliTests(unittest.TestCase):
                 str(PACKAGE_IMAGE),
                 "--ocr-fixture",
                 str(OCR_FIXTURE),
+                "--llm-mode",
+                "disabled",
                 "--output-dir",
                 str(output_dir),
                 "--publish-cos",
@@ -276,6 +283,9 @@ def _run_cli(*args: str, env_overrides: dict[str, str] | None = None, cwd: Path 
     env.pop("ZHIPUAI_API_KEY", None)
     env.pop("PPOCRV6_API_KEY", None)
     env.pop("PPOCRV6_TOKEN", None)
+    env.pop("LLM_API_KEY", None)
+    env.pop("LLM_BASE_URL", None)
+    env.pop("LLM_MODEL", None)
     if env_overrides:
         env.update(env_overrides)
     env["PYTHONPATH"] = os.pathsep.join(part for part in (str(ROOT / "src"), env.get("PYTHONPATH", "")) if part)

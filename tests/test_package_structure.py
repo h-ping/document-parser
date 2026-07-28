@@ -6,11 +6,12 @@ from pathlib import Path
 
 from document_parser.image_compare import compare_standard_to_ocr
 from document_parser.image_compare_cli import run_compare_package_image
-from document_parser.llm import LlmClient
+from document_parser.llm import LlmClient, LlmError
 from document_parser.models import BBoxNormalized, OcrLine
 from document_parser.package_structure import (
     PACKAGE_STRUCTURE_LLM_MAX_TOKENS,
     build_package_glm_blocks,
+    build_package_ppocr_blocks,
     normalize_package_structure_output,
     run_package_structure_stage,
 )
@@ -42,9 +43,9 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(blocks["provider_features"]["block_count"], 2)
         self.assertEqual(blocks["blocks"][0]["cleaned_text"], "产品名称：红豆奶茶")
         self.assertEqual(blocks["blocks"][1]["table"]["rows"][1]["cells"][0]["text"], "能量")
-        self.assertEqual(blocks["blocks"][1]["table"]["rows"][1]["cells"][1]["cell_id"], "block_2:r2c2")
+        self.assertEqual(blocks["blocks"][1]["table"]["rows"][1]["cells"][1]["cell_id"], "glm:cell_glm_block_2_r2c2")
 
-    def test_structure_output_rejects_unknown_source_and_marks_unsupported_text_for_review(self) -> None:
+    def test_structure_output_rejects_unknown_source_and_unsupported_text(self) -> None:
         blocks = build_package_glm_blocks([_glm_line("ocr_1", "block_1", 1, "text", "产品名称：红豆奶茶", 0.1, 0.1, 0.3, 0.12)])
 
         structured, quality = normalize_package_structure_output(
@@ -85,10 +86,68 @@ class PackageStructureTests(unittest.TestCase):
         )
 
         self.assertEqual(quality["status"], "review_required")
-        self.assertEqual(len(structured["fields"]), 2)
-        self.assertEqual(len(structured["rejected_items"]), 1)
-        storage = next(item for item in structured["fields"] if item["semantic_key"] == "product.storage")
-        self.assertTrue(storage["review_required"])
+        self.assertEqual(len(structured["fields"]), 1)
+        self.assertEqual(len(structured["rejected_items"]), 2)
+        rejected_keys = {item["item"].get("semantic_key") for item in structured["rejected_items"]}
+        self.assertEqual(rejected_keys, {"product.shelf_life", "product.storage"})
+
+    def test_unsupported_structured_text_does_not_mask_real_ocr_mismatch(self) -> None:
+        blocks = {
+            "glm_blocks": build_package_glm_blocks(
+                [_glm_line("glm_1", "block_1", 1, "text", "产品标准代号：Q/SCQC 0038S", 0.1, 0.1, 0.4, 0.12)]
+            ),
+            "ppocr_blocks": build_package_ppocr_blocks(
+                [_ppocr_line("pp_1", "产品标准代号：Q/SCQC 0038S", 0.1, 0.1, 0.4, 0.12)]
+            ),
+        }
+        structured, quality = normalize_package_structure_output(
+            {
+                "fields": [
+                    {
+                        "semantic_key": "product.standard_code",
+                        "label": "产品标准号",
+                        "text": "产品标准号：Q/SCQC 0010S",
+                        "source_ids": ["glm:line_glm_1", "pp:line_pp_1"],
+                        "confidence": 1.0,
+                        "review_required": False,
+                    },
+                    {
+                        "semantic_key": "product.standard_code",
+                        "label": "产品标准代号",
+                        "text": "产品标准代号：Q/SCQC 0038S",
+                        "source_ids": ["glm:line_glm_1", "pp:line_pp_1"],
+                        "confidence": 1.0,
+                        "review_required": False,
+                    },
+                ],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [],
+                "other_text": [],
+                "warnings": [],
+            },
+            blocks,
+        )
+
+        self.assertEqual(quality["status"], "review_required")
+        self.assertEqual([item["text"] for item in structured["fields"]], ["产品标准代号：Q/SCQC 0038S"])
+
+        artifacts = {
+            "standard_items": [_standard_item("std_1", "product.standard_code", "产品标准号", "产品标准号：Q/SCQC 0010S")],
+            "field_groups": [],
+            "lists": [],
+            "tables": [],
+        }
+        result = compare_standard_to_ocr(
+            artifacts,
+            [_ppocr_line("pp_1", "产品标准代号：Q/SCQC 0038S", 0.1, 0.1, 0.4, 0.12)],
+            PACKAGE_IMAGE,
+            package_structure=structured,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "critical_mismatch")
+        self.assertEqual(result["selected_candidate"]["text"], "产品标准代号：Q/SCQC 0038S")
 
     def test_compare_uses_structured_package_items_and_keeps_prefix_strict(self) -> None:
         artifacts = {
@@ -252,6 +311,174 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(sugar["status"], "pass")
         self.assertEqual(sugar["selected_candidate"]["text"], "糖 2.1克 -")
 
+    def test_nutrition_matching_uses_complete_glm_table_when_table_id_differs(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "table_type": "nutrition_facts",
+                    "title": "营养成分表",
+                    "columns": [
+                        {"column_id": "item", "name": "项目"},
+                        {"column_id": "amount", "name": "每100克"},
+                        {"column_id": "nrv", "name": "营养素参考值%"},
+                    ],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": [
+                                {"column_id": "item", "raw_value": "蛋白质"},
+                                {"column_id": "amount", "raw_value": "20.0克"},
+                                {"column_id": "nrv", "raw_value": "33%"},
+                            ],
+                        }
+                    ],
+                    "footnotes": [],
+                }
+            ],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [],
+            "nutrition_tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "title": "营养成分表",
+                    "columns": ["项目", "每100克", "营养素参考值%"],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": ["蛋白质", "", ""],
+                            "source_ocr_line_ids": ["pp_label_only"],
+                            "bbox_normalized": {"x1": 0.1, "y1": 0.2, "x2": 0.4, "y2": 0.3},
+                            "confidence": 0.99,
+                            "review_required": False,
+                        }
+                    ],
+                    "footnotes": [],
+                    "review_required": False,
+                    "metadata": {"source_provider": "ppocr"},
+                },
+                {
+                    "table_id": "nutri_1",
+                    "title": "营养成分表",
+                    "columns": ["项目", "每100克", "营养素参考值%"],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": ["蛋白质", "20.0克", "33%"],
+                            "source_ocr_line_ids": ["glm_table"],
+                            "bbox_normalized": {"x1": 0.5, "y1": 0.2, "x2": 0.8, "y2": 0.3},
+                            "confidence": 0.99,
+                            "review_required": False,
+                        }
+                    ],
+                    "footnotes": [],
+                    "review_required": False,
+                    "metadata": {"source_provider": "glm"},
+                },
+            ],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="nutrition",
+        )["comparison_result"]["results"][2]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["text"], "蛋白质 20.0克 33%")
+        self.assertEqual(result["selected_candidate"]["source_ocr_line_ids"], ["glm_table"])
+
+    def test_nutrition_matching_uses_first_cell_when_row_key_is_generic(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "table_type": "nutrition_facts",
+                    "title": "营养成分表",
+                    "columns": [
+                        {"column_id": "item", "name": "项目"},
+                        {"column_id": "amount", "name": "每100克"},
+                        {"column_id": "nrv", "name": "营养素参考值%"},
+                    ],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": [
+                                {"column_id": "item", "raw_value": "蛋白质"},
+                                {"column_id": "amount", "raw_value": "20.0克"},
+                                {"column_id": "nrv", "raw_value": "33%"},
+                            ],
+                        }
+                    ],
+                    "footnotes": [],
+                }
+            ],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [],
+            "nutrition_tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "title": "营养成分表",
+                    "columns": ["项目", "每100克", "营养素参考值%"],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": ["蛋白质", "", ""],
+                            "source_ocr_line_ids": ["pp_label_only"],
+                            "bbox_normalized": {"x1": 0.1, "y1": 0.2, "x2": 0.4, "y2": 0.3},
+                            "confidence": 0.99,
+                            "review_required": True,
+                        }
+                    ],
+                    "footnotes": [],
+                    "review_required": True,
+                    "metadata": {"source_provider": "ppocr"},
+                },
+                {
+                    "table_id": "nutrition_table_1",
+                    "title": "营养成分表",
+                    "columns": ["项目", "每100克", "营养素参考值%"],
+                    "rows": [
+                        {
+                            "row_key": "row_2",
+                            "cells": ["蛋白质", "20.0克", "33%"],
+                            "source_ocr_line_ids": ["glm_table"],
+                            "bbox_normalized": {"x1": 0.5, "y1": 0.2, "x2": 0.8, "y2": 0.3},
+                            "confidence": 0.99,
+                            "review_required": False,
+                        }
+                    ],
+                    "footnotes": [],
+                    "review_required": False,
+                    "metadata": {"source_provider": "glm"},
+                },
+            ],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="nutrition",
+        )["comparison_result"]["results"][2]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["text"], "蛋白质 20.0克 33%")
+        self.assertEqual(result["selected_candidate"]["source_ocr_line_ids"], ["glm_table"])
+
     def test_all_scope_structured_fields_win_over_contaminated_ppocr_candidates(self) -> None:
         artifacts = {
             "standard_items": [
@@ -296,8 +523,52 @@ class PackageStructureTests(unittest.TestCase):
             self.assertEqual(result["status"], "pass", semantic_key)
             self.assertEqual(result["selected_candidate"]["candidate_type"], "package_structured_field", semantic_key)
             self.assertIn("glm_structured_field_match", result["match_quality_flags"], semantic_key)
-            if semantic_key != "custom.allergen_notice":
-                self.assertIn("ppocr_glm_field_conflict", result["match_quality_flags"], semantic_key)
+            self.assertNotIn("请注意：温度超过36℃", result["selected_candidate"]["text"], semantic_key)
+
+    def test_long_text_uses_complete_structured_alias_candidate(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item(
+                    "std_1",
+                    "product.ingredients",
+                    "配料",
+                    "配料：葡萄糖浆，白砂糖，青提汁≥1.5%，柠檬酸，食用香精",
+                )
+            ],
+            "field_groups": [],
+            "lists": [],
+            "tables": [],
+        }
+        complete_candidate = _structured_field(
+            "ingredients",
+            "配料",
+            "配料：葡萄糖浆，白砂糖，青提汁≥1.5%，柠檬酸，食用香精。致敏物提示：含有乳制品。",
+            "glm_1",
+            group_id="product_001",
+        )
+        complete_candidate["confidence"] = 0.0
+        complete_candidate["metadata"] = {"source_provider": "glm", "source_confidence": 1.0}
+        package_structure = {
+            "enabled": True,
+            "fields": [
+                _structured_field("product.ingredients", "配料", "配料：葡萄糖浆，白砂糖，", "pp_1"),
+                complete_candidate,
+            ],
+            "nutrition_tables": [],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["text"], "配料：葡萄糖浆，白砂糖，青提汁≥1.5%，柠檬酸，食用香精。")
+        self.assertNotIn("致敏物提示", result["selected_candidate"]["text"])
+        self.assertIn("glm_structured_field_match", result["match_quality_flags"])
 
     def test_review_required_structured_field_does_not_auto_pass_when_ppocr_can_match(self) -> None:
         artifacts = {
@@ -484,14 +755,238 @@ class PackageStructureTests(unittest.TestCase):
             ["fields", "field_groups", "content_items", "nutrition_tables", "other_text", "warnings"],
         )
 
+    def test_ppocr_blocks_use_provider_prefixed_sources_and_chunked_input(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item("std_1", "product.ingredients", "配料", "配料：生牛乳，乳糖"),
+                _standard_item("std_2", "product.storage_condition", "贮存条件", "贮存条件：阴凉干燥处保存"),
+            ],
+            "field_groups": [],
+            "tables": [],
+        }
+        ppocr_lines = [
+            _ppocr_line("pp_1", "配料：生牛乳，乳糖 贮存条件：阴凉干燥处保存", 0.1, 0.1, 0.7, 0.12),
+            _ppocr_line("pp_2", "无关宣传语", 0.1, 0.5, 0.3, 0.52),
+        ]
+
+        blocks = build_package_ppocr_blocks(ppocr_lines)
+        run = run_package_structure_stage(
+            artifacts=artifacts,
+            ppocr_lines=ppocr_lines,
+            glm_lines=[],
+            llm_mode="auto",
+            llm_client=None,
+        )
+
+        self.assertTrue(blocks["blocks"][0]["block_id"].startswith("pp:block_"))
+        self.assertEqual(blocks["blocks"][0]["lines"][0]["line_id"], "pp:line_pp_1")
+        body = run.package_llm_structure_input
+        self.assertEqual(body["task"], "structure_package_text_from_chunked_ocr_evidence")
+        self.assertGreaterEqual(len(body["evidence_chunks"]), 1)
+        self.assertTrue((run.package_llm_structure_chunks["chunks"]))
+        first_chunk = body["evidence_chunks"][0]
+        self.assertIn("ppocr_blocks", first_chunk)
+        self.assertNotIn("ppocr_lines", body)
+
+    def test_normalize_accepts_ppocr_source_ids_and_marks_provider(self) -> None:
+        ppocr_blocks = build_package_ppocr_blocks([
+            _ppocr_line("pp_1", "贮存条件：阴凉干燥处保存", 0.1, 0.1, 0.4, 0.12)
+        ])
+
+        structured, quality = normalize_package_structure_output(
+            {
+                "fields": [
+                    {
+                        "semantic_key": "product.storage_condition",
+                        "label": "贮存条件",
+                        "text": "贮存条件：阴凉干燥处保存",
+                        "source_ids": ["pp:line_pp_1"],
+                        "confidence": 0.95,
+                        "review_required": False,
+                    }
+                ],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [],
+                "other_text": [],
+                "warnings": [],
+            },
+            {"glm_blocks": build_package_glm_blocks([]), "ppocr_blocks": ppocr_blocks},
+        )
+
+        self.assertEqual(quality["status"], "pass")
+        field = structured["fields"][0]
+        self.assertEqual(field["source_ocr_line_ids"], ["pp_1"])
+        self.assertEqual(field["metadata"]["source_provider"], "ppocr")
+        self.assertFalse(field["review_required"])
+
+    def test_normalize_ignores_empty_structured_placeholders(self) -> None:
+        structured, quality = normalize_package_structure_output(
+            {
+                "fields": [{"group_id": "manufacturer_e1"}],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [],
+                "other_text": [],
+                "warnings": [],
+            },
+            {"glm_blocks": build_package_glm_blocks([]), "ppocr_blocks": build_package_ppocr_blocks([])},
+        )
+
+        self.assertEqual(quality["status"], "pass")
+        self.assertEqual(quality["error_count"], 0)
+        self.assertEqual(structured["rejected_items"], [])
+
+    def test_ppocr_structured_field_can_pass_when_raw_ppocr_is_contaminated(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_1", "product.storage_condition", "贮存条件", "贮存条件：阴凉干燥处保存")],
+            "field_groups": [],
+            "lists": [],
+            "tables": [],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [
+                {
+                    **_structured_field("product.storage_condition", "贮存条件", "贮存条件：阴凉干燥处保存", "pp_1"),
+                    "source_ids": ["pp:line_pp_1"],
+                    "metadata": {"source_provider": "ppocr"},
+                }
+            ],
+            "nutrition_tables": [],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [_ppocr_line("pp_1", "贮存条件：阴凉干燥处保存 生产者：错误公司", 0.1, 0.1, 0.8, 0.12)],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["candidate_type"], "package_structured_field")
+        self.assertIn("ppocr_structured_field_match", result["match_quality_flags"])
+
+    def test_conflicting_glm_and_ppocr_structured_fields_choose_closest_to_standard(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_1", "product.shelf_life", "保质期", "保质期：12个月")],
+            "field_groups": [],
+            "lists": [],
+            "tables": [],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [
+                {
+                    **_structured_field("product.shelf_life", "保质期", "保质期：12个月", "glm_1"),
+                    "source_ids": ["glm:block_1"],
+                    "metadata": {"source_provider": "glm"},
+                },
+                {
+                    **_structured_field("product.shelf_life", "保质期", "保质期：18个月", "pp_1"),
+                    "source_ids": ["pp:line_pp_1"],
+                    "metadata": {"source_provider": "ppocr"},
+                },
+            ],
+            "nutrition_tables": [],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [_ppocr_line("pp_1", "保质期：18个月", 0.1, 0.1, 0.4, 0.12)],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["reason"], "package_structured_text_match")
+        self.assertEqual(result["selected_candidate"]["text"], "保质期：12个月")
+        self.assertIn("ppocr_glm_field_conflict", result["match_quality_flags"])
+
+    def test_llm_error_still_enables_glm_nutrition_table_fallback(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                {
+                    "table_id": "nutrition_n1",
+                    "table_type": "nutrition_facts",
+                    "title": "营养成分表",
+                    "columns": [
+                        {"column_id": "item", "name": "项目"},
+                        {"column_id": "amount", "name": "每100克"},
+                        {"column_id": "nrv", "name": "营养素参考值%"},
+                    ],
+                    "rows": [
+                        {
+                            "row_key": "蛋白质",
+                            "cells": [
+                                {"column_id": "item", "raw_value": "蛋白质"},
+                                {"column_id": "amount", "raw_value": "20.0克"},
+                                {"column_id": "nrv", "raw_value": "33%"},
+                            ],
+                        }
+                    ],
+                    "footnotes": [],
+                }
+            ],
+        }
+        glm_lines = [
+            _glm_line(
+                "glm_1",
+                "table_1",
+                1,
+                "table",
+                "<table><tr><td>项目</td><td>每100克</td><td>营养素参考值%</td></tr><tr><td>蛋白质</td><td>20.0克</td><td>33%</td></tr></table>",
+                0.1,
+                0.1,
+                0.4,
+                0.3,
+            )
+        ]
+        run = run_package_structure_stage(
+            artifacts=artifacts,
+            ppocr_lines=[],
+            glm_lines=glm_lines,
+            llm_mode="auto",
+            llm_client=FailingPackageStructureLlm(),
+        )
+
+        self.assertFalse(run.runtime["enabled"])
+        self.assertTrue(run.package_structured_items["enabled"])
+        self.assertEqual(run.package_structured_items["source"], "glm_table_fallback")
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            glm_lines,
+            PACKAGE_IMAGE,
+            package_structure=run.package_structured_items,
+            package_structure_scope="nutrition",
+        )["comparison_result"]["results"][2]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["text"], "蛋白质 20.0克 33%")
+
 
 class FakePackageStructureLlm(LlmClient):
     def structured_json(self, system: str, user: str, schema: dict) -> dict:
         del system, schema
         body = json.loads(user)
-        blocks = body["glm_blocks"]
+        blocks = body["evidence_chunk"]["glm_blocks"]
+        if not blocks:
+            return {
+                "fields": [],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [],
+                "other_text": [],
+                "warnings": [],
+            }
         title_block = blocks[0]
-        table_block = blocks[1]
+        table_block = next((block for block in blocks if block.get("table")), blocks[-1])
         cells = table_block["table"]["rows"]
         return {
             "fields": [
@@ -551,6 +1046,12 @@ class BudgetCapturingPackageStructureLlm(FakePackageStructureLlm):
             "other_text": [],
             "warnings": [],
         }
+
+
+class FailingPackageStructureLlm(LlmClient):
+    def structured_json(self, system: str, user: str, schema: dict) -> dict:
+        del system, user, schema
+        raise LlmError("simulated")
 
 
 def _write_standard_artifacts(standard_dir: Path) -> None:

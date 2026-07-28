@@ -117,7 +117,8 @@ def run_compare_package_image(
     active_llm_client = llm_client or _llm_client_for_mode(llm_mode, config)
     structure_run = run_package_structure_stage(
         artifacts=artifacts,
-        ocr_lines=ocr_run["structure_lines"],
+        ppocr_lines=ppocr_lines,
+        glm_lines=glm_lines,
         llm_mode=llm_mode,
         llm_client=active_llm_client,
     )
@@ -370,8 +371,10 @@ def _source_summary(lines: list[OcrLine], fixture_path: Path | None, page_size: 
 def _fusion_evidence(ocr_run: dict[str, Any], structure_run: Any, package_structure_scope: str) -> dict[str, Any]:
     effective_mode = str(ocr_run.get("effective_mode") or "")
     structure_enabled = bool(structure_run.package_structured_items.get("enabled"))
-    if effective_mode == "hybrid" and structure_enabled and package_structure_scope == "all":
-        field_text_source = "llm_structured_with_ppocr_fallback"
+    runtime = structure_run.runtime if isinstance(structure_run.runtime, dict) else {}
+    llm_structure_enabled = bool(runtime.get("enabled"))
+    if effective_mode == "hybrid" and llm_structure_enabled and package_structure_scope == "all":
+        field_text_source = "llm_structured_fusion_ocr"
     else:
         field_text_source = "ppocr" if ocr_run.get("ppocr_lines") else "glm_ocr"
     return {
@@ -382,7 +385,8 @@ def _fusion_evidence(ocr_run: dict[str, Any], structure_run: Any, package_struct
         "package_structure_scope": package_structure_scope,
         "ppocr_line_count": len(ocr_run.get("ppocr_lines") or []),
         "glm_line_count": len(ocr_run.get("glm_lines") or []),
-        "llm_structure_enabled": structure_enabled,
+        "llm_structure_enabled": llm_structure_enabled,
+        "package_structure_enabled": structure_enabled,
     }
 
 
