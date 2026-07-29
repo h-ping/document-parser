@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import difflib
 from html import unescape
 from html.parser import HTMLParser
 import json
@@ -15,6 +16,10 @@ from .utils import stable_id, write_json
 
 LlmMode = Literal["auto", "disabled", "required"]
 PACKAGE_STRUCTURE_LLM_MAX_TOKENS = 32768
+STRUCTURED_FIELD_SEMANTIC_KEY_ALIASES = {
+    "product_type": "product.product_type",
+    "custom.product_type": "product.product_type",
+}
 
 
 class PackageStructureError(RuntimeError):
@@ -201,15 +206,15 @@ def run_package_structure_stage(
     evidence_bundle = _evidence_bundle(package_glm_blocks, package_ppocr_blocks)
     structure_input = build_package_llm_structure_input(artifacts, package_glm_blocks, package_ppocr_blocks)
     if llm_mode == "disabled":
-        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "llm_mode_disabled")
+        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "llm_mode_disabled", artifacts)
     if not structure_input["evidence_chunks"]:
         if llm_mode == "required":
             raise PackageStructureError("LLM package structure requires OCR evidence chunks, but none were found.")
-        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "no_ocr_evidence_chunks")
+        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "no_ocr_evidence_chunks", artifacts)
     if llm_client is None:
         if llm_mode == "required":
             raise PackageStructureError("LLM package structure requires LLM_API_KEY, LLM_BASE_URL and LLM_MODEL.")
-        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "llm_env_not_configured")
+        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, "llm_env_not_configured", artifacts)
 
     try:
         chunk_outputs = []
@@ -230,10 +235,10 @@ def run_package_structure_stage(
     except LlmError as exc:
         if llm_mode == "required":
             raise PackageStructureError(f"LLM package structure failed: {exc}") from exc
-        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, f"llm_error:{exc.__class__.__name__}")
+        return _disabled_run(package_glm_blocks, package_ppocr_blocks, structure_input, f"llm_error:{exc.__class__.__name__}", artifacts)
 
     llm_output = _merge_llm_chunk_outputs([_as_dict(item.get("body")) for item in chunk_outputs])
-    package_structured_items, quality_report = normalize_package_structure_output(llm_output, evidence_bundle)
+    package_structured_items, quality_report = normalize_package_structure_output(llm_output, evidence_bundle, artifacts)
     chunk_artifact = _chunk_artifact(structure_input, chunk_outputs)
     return StructureRun(
         package_glm_blocks=package_glm_blocks,
@@ -270,6 +275,13 @@ def write_package_structure_artifacts(output_dir: Path, run: StructureRun) -> No
     write_json(output_dir / "package_llm_structure_chunks.json", run.package_llm_structure_chunks)
     write_json(output_dir / "package_llm_structure_output.json", run.package_llm_structure_output)
     write_json(output_dir / "package_structured_items.json", run.package_structured_items)
+    write_json(
+        output_dir / "nutrition_table_alignment.json",
+        run.package_structured_items.get(
+            "nutrition_table_alignment",
+            {"artifact_version": "nutrition_table_alignment_v0.1", "standard_tables": [], "package_tables": []},
+        ),
+    )
     write_json(output_dir / "package_structure_quality_report.json", run.package_structure_quality_report)
     write_json(output_dir / "package_fusion_structure_quality_report.json", run.package_fusion_structure_quality_report)
 
@@ -426,7 +438,11 @@ def build_package_llm_structure_input(
     }
 
 
-def normalize_package_structure_output(body: dict[str, Any], package_glm_blocks: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def normalize_package_structure_output(
+    body: dict[str, Any],
+    package_glm_blocks: dict[str, Any],
+    artifacts: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     source_index = _source_index(package_glm_blocks)
     errors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -465,8 +481,12 @@ def normalize_package_structure_output(body: dict[str, Any], package_glm_blocks:
         else:
             fields.append(normalized)
 
+    fields, field_duplicates_removed = _dedupe_structured_fields(fields)
+
     for index, table in enumerate(_as_list(body.get("nutrition_tables")), start=1):
         tables.append(_normalize_nutrition_table(index, _as_dict(table), source_index, errors))
+
+    tables, nutrition_alignment = _canonicalize_nutrition_tables(tables, _standard_nutrition_tables(_as_dict(artifacts)))
 
     status = "pass" if not errors else "review_required"
     package_structured_items = {
@@ -477,6 +497,7 @@ def normalize_package_structure_output(body: dict[str, Any], package_glm_blocks:
         "field_groups": _as_list(body.get("field_groups")),
         "content_items": _as_list(body.get("content_items")),
         "nutrition_tables": tables,
+        "nutrition_table_alignment": nutrition_alignment,
         "other_text": _as_list(body.get("other_text")),
         "rejected_items": rejected,
     }
@@ -488,7 +509,10 @@ def normalize_package_structure_output(body: dict[str, Any], package_glm_blocks:
         "errors": errors,
         "rejected_item_count": len(rejected),
         "field_count": len(fields),
+        "structured_field_duplicate_removed_count": field_duplicates_removed,
         "nutrition_table_count": len(tables),
+        "nutrition_table_duplicate_removed_count": nutrition_alignment.get("duplicate_removed_count", 0),
+        "nutrition_table_alignment_missing_count": nutrition_alignment.get("alignment_missing_count", 0),
     }
     return package_structured_items, quality_report
 
@@ -498,8 +522,12 @@ def _disabled_run(
     package_ppocr_blocks: dict[str, Any],
     structure_input: dict[str, Any],
     reason: str,
+    artifacts: dict[str, Any],
 ) -> StructureRun:
-    fallback_tables = _glm_nutrition_table_fallback(package_glm_blocks)
+    fallback_tables, nutrition_alignment = _canonicalize_nutrition_tables(
+        _glm_nutrition_table_fallback(package_glm_blocks),
+        _standard_nutrition_tables(artifacts),
+    )
     fallback_enabled = bool(fallback_tables)
     quality_report = {
         "artifact_version": "package_structure_quality_report_v0.1",
@@ -525,6 +553,7 @@ def _disabled_run(
             "field_groups": [],
             "content_items": [],
             "nutrition_tables": fallback_tables,
+            "nutrition_table_alignment": nutrition_alignment,
             "other_text": [],
             "rejected_items": [],
         },
@@ -546,7 +575,8 @@ def _disabled_run(
 
 def _glm_nutrition_table_fallback(package_glm_blocks: dict[str, Any]) -> list[dict[str, Any]]:
     tables = []
-    for block_index, block in enumerate(_as_list(package_glm_blocks.get("blocks")), start=1):
+    blocks = [_as_dict(block) for block in _as_list(package_glm_blocks.get("blocks"))]
+    for block_index, block in enumerate(blocks, start=1):
         block_dict = _as_dict(block)
         table = _as_dict(block_dict.get("table"))
         rows = _as_list(table.get("rows"))
@@ -578,13 +608,24 @@ def _glm_nutrition_table_fallback(package_glm_blocks: dict[str, Any]) -> list[di
             )
         if not data_rows:
             continue
+        title_block = _nutrition_title_block_for_table(block_dict, blocks)
+        title = str(title_block.get("cleaned_text") or "营养成分表") if title_block else "营养成分表"
+        source_ids = [str(block_dict.get("block_id") or "")]
+        if title_block:
+            source_ids.insert(0, str(title_block.get("block_id") or ""))
+        table_line_ids = [str(line_id) for line_id in source_ocr_line_ids]
+        if title_block:
+            table_line_ids = [
+                *[str(line_id) for line_id in _as_list(title_block.get("source_ocr_line_ids"))],
+                *table_line_ids,
+            ]
         tables.append(
             {
                 "structured_table_id": stable_id("pkg_glm_table", len(tables) + 1),
                 "table_id": stable_id("glm_nutrition", block_index),
-                "title": "营养成分表",
-                "source_ids": [str(block_dict.get("block_id") or "")],
-                "source_ocr_line_ids": source_ocr_line_ids,
+                "title": title,
+                "source_ids": source_ids,
+                "source_ocr_line_ids": table_line_ids,
                 "bbox_normalized": block_dict.get("bbox_normalized"),
                 "columns": header,
                 "rows": data_rows,
@@ -595,6 +636,58 @@ def _glm_nutrition_table_fallback(package_glm_blocks: dict[str, Any]) -> list[di
             }
         )
     return tables
+
+
+def _nutrition_title_block_for_table(table_block: dict[str, Any], blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    table_bbox = _as_dict(table_block.get("bbox_normalized"))
+    if not table_bbox:
+        return None
+    candidates = []
+    for block in blocks:
+        block_dict = _as_dict(block)
+        if _as_dict(block_dict.get("table")):
+            continue
+        text = str(block_dict.get("cleaned_text") or "")
+        if not _looks_like_nutrition_title(text):
+            continue
+        bbox = _as_dict(block_dict.get("bbox_normalized"))
+        if not bbox:
+            continue
+        vertical_gap = float(table_bbox.get("y1") or 0.0) - float(bbox.get("y2") or 0.0)
+        if vertical_gap < -0.01 or vertical_gap > 0.08:
+            continue
+        overlap = _horizontal_overlap_ratio(table_bbox, bbox)
+        center_distance = abs(_bbox_center_x(table_bbox) - _bbox_center_x(bbox))
+        table_width = max(float(table_bbox.get("x2") or 0.0) - float(table_bbox.get("x1") or 0.0), 0.001)
+        if overlap <= 0.05 and center_distance > table_width:
+            continue
+        candidates.append((vertical_gap + center_distance, block_dict))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _looks_like_nutrition_title(text: str) -> bool:
+    cleaned = clean_glm_text(text)
+    if "营养成分表" not in cleaned:
+        return False
+    if any(token in cleaned for token in ("项目", "每100", "营养素参考值", "能量", "蛋白质", "碳水化合物")):
+        return False
+    return len(cleaned) <= 40
+
+
+def _horizontal_overlap_ratio(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_x1 = float(left.get("x1") or 0.0)
+    left_x2 = float(left.get("x2") or 0.0)
+    right_x1 = float(right.get("x1") or 0.0)
+    right_x2 = float(right.get("x2") or 0.0)
+    overlap = max(0.0, min(left_x2, right_x2) - max(left_x1, right_x1))
+    width = max(min(left_x2 - left_x1, right_x2 - right_x1), 0.001)
+    return overlap / width
+
+
+def _bbox_center_x(bbox: dict[str, Any]) -> float:
+    return (float(bbox.get("x1") or 0.0) + float(bbox.get("x2") or 0.0)) / 2
 
 
 def _table_row_texts(row: Any) -> list[str]:
@@ -619,6 +712,207 @@ def _nutrition_header_index(rows: list[list[str]]) -> int | None:
         if "项目" in text and ("营养素参考值" in text or "NRV" in text or "nrv" in text.lower()):
             return index
     return None
+
+
+def _standard_nutrition_tables(artifacts: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        table
+        for table in (_as_dict(item) for item in _as_list(artifacts.get("tables")))
+        if table.get("table_type") == "nutrition_facts"
+    ]
+
+
+def _canonicalize_nutrition_tables(
+    tables: list[dict[str, Any]],
+    standard_tables: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    aligned = [_align_package_nutrition_table(table, standard_tables) for table in tables]
+    by_duplicate_key: dict[str, dict[str, Any]] = {}
+    duplicates = []
+    for table in aligned:
+        key = _nutrition_table_duplicate_key(table)
+        previous = by_duplicate_key.get(key)
+        if previous is None or _nutrition_table_quality(table) > _nutrition_table_quality(previous):
+            if previous is not None:
+                duplicates.append(_nutrition_alignment_record(previous, "duplicate_removed"))
+            by_duplicate_key[key] = table
+        else:
+            duplicates.append(_nutrition_alignment_record(table, "duplicate_removed"))
+
+    unique_tables = list(by_duplicate_key.values())
+    by_standard_id: dict[str, dict[str, Any]] = {}
+    unaligned = []
+    replaced = []
+    for table in unique_tables:
+        aligned_id = _nutrition_aligned_standard_table_id(table)
+        if not aligned_id:
+            unaligned.append(table)
+            continue
+        previous = by_standard_id.get(aligned_id)
+        if previous is None or _nutrition_table_quality(table) > _nutrition_table_quality(previous):
+            if previous is not None:
+                replaced.append(_nutrition_alignment_record(previous, "lower_quality_alignment_removed"))
+            by_standard_id[aligned_id] = table
+        else:
+            replaced.append(_nutrition_alignment_record(table, "lower_quality_alignment_removed"))
+
+    ordered = []
+    for standard_table in standard_tables:
+        table = by_standard_id.get(str(standard_table.get("table_id") or ""))
+        if table is not None:
+            ordered.append(table)
+    ordered.extend(table for table in unique_tables if not _nutrition_aligned_standard_table_id(table))
+    if not standard_tables:
+        ordered = unique_tables
+
+    package_records = [_nutrition_alignment_record(table, "kept") for table in ordered]
+    missing_standard_ids = [
+        str(table.get("table_id") or "")
+        for table in standard_tables
+        if str(table.get("table_id") or "") and str(table.get("table_id") or "") not in by_standard_id
+    ]
+    alignment = {
+        "artifact_version": "nutrition_table_alignment_v0.1",
+        "standard_table_count": len(standard_tables),
+        "package_table_input_count": len(tables),
+        "package_table_count": len(ordered),
+        "duplicate_removed_count": len(duplicates) + len(replaced),
+        "alignment_missing_count": len(missing_standard_ids),
+        "standard_tables": [
+            {
+                "table_id": table.get("table_id"),
+                "title": table.get("title"),
+                "aligned": str(table.get("table_id") or "") in by_standard_id,
+            }
+            for table in standard_tables
+        ],
+        "package_tables": package_records,
+        "removed_tables": [*duplicates, *replaced],
+        "missing_standard_table_ids": missing_standard_ids,
+    }
+    return ordered, alignment
+
+
+def _align_package_nutrition_table(table: dict[str, Any], standard_tables: list[dict[str, Any]]) -> dict[str, Any]:
+    original_table_id = str(table.get("table_id") or "")
+    best_standard, score, method = _best_standard_table_alignment(table, standard_tables)
+    metadata = {**_as_dict(table.get("metadata"))}
+    metadata["original_table_id"] = original_table_id or None
+    metadata["alignment_score"] = score
+    metadata["alignment_method"] = method
+    if best_standard is not None:
+        aligned_id = str(best_standard.get("table_id") or "")
+        metadata["aligned_standard_table_id"] = aligned_id
+        table_id = aligned_id
+    else:
+        aligned_id = ""
+        table_id = original_table_id
+    return {
+        **table,
+        "table_id": table_id,
+        "aligned_standard_table_id": aligned_id or None,
+        "metadata": metadata,
+    }
+
+
+def _best_standard_table_alignment(
+    table: dict[str, Any],
+    standard_tables: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, float, str]:
+    if not standard_tables:
+        return None, 0.0, "no_standard_tables"
+    table_id = str(table.get("table_id") or "")
+    for standard_table in standard_tables:
+        if table_id and table_id == str(standard_table.get("table_id") or ""):
+            return standard_table, 1.0, "table_id"
+    if len(standard_tables) == 1:
+        return standard_tables[0], 0.5, "single_standard_table"
+
+    title_norm = _nutrition_title_norm(str(table.get("title") or ""))
+    if not title_norm:
+        return None, 0.0, "missing_title"
+    exact = [
+        standard_table
+        for standard_table in standard_tables
+        if title_norm == _nutrition_title_norm(str(standard_table.get("title") or ""))
+    ]
+    if len(exact) == 1:
+        return exact[0], 0.98, "title_exact"
+
+    scored = [
+        (
+            difflib.SequenceMatcher(None, title_norm, _nutrition_title_norm(str(standard_table.get("title") or ""))).ratio(),
+            standard_table,
+        )
+        for standard_table in standard_tables
+        if _nutrition_title_norm(str(standard_table.get("title") or ""))
+    ]
+    if not scored:
+        return None, 0.0, "no_title_candidates"
+    score, standard_table = max(scored, key=lambda item: item[0])
+    if score >= 0.9:
+        return standard_table, score, "title_fuzzy"
+    return None, score, "title_no_match"
+
+
+def _nutrition_aligned_standard_table_id(table: dict[str, Any]) -> str:
+    metadata = _as_dict(table.get("metadata"))
+    return str(table.get("aligned_standard_table_id") or metadata.get("aligned_standard_table_id") or "")
+
+
+def _nutrition_table_duplicate_key(table: dict[str, Any]) -> str:
+    source_ids = sorted(str(source_id) for source_id in _as_list(table.get("source_ids")) if str(source_id).strip())
+    if source_ids:
+        return "source:" + "|".join(source_ids)
+    bbox = _as_dict(table.get("bbox_normalized"))
+    if bbox:
+        parts = [str(round(float(bbox.get(key) or 0.0), 3)) for key in ("x1", "y1", "x2", "y2")]
+        return "bbox:" + "|".join(parts)
+    return "content:" + _nutrition_title_norm(str(table.get("title") or "")) + "|" + _nutrition_rows_signature(table)
+
+
+def _nutrition_rows_signature(table: dict[str, Any]) -> str:
+    rows = []
+    for row in _as_list(table.get("rows")):
+        row_dict = _as_dict(row)
+        cells = [_evidence_norm(str(cell)) for cell in _as_list(row_dict.get("cells"))]
+        rows.append("/".join(cell for cell in cells if cell))
+    return "|".join(rows)
+
+
+def _nutrition_table_quality(table: dict[str, Any]) -> float:
+    metadata = _as_dict(table.get("metadata"))
+    score = float(metadata.get("alignment_score") or 0.0) * 1000.0
+    score += len(_as_list(table.get("rows"))) * 10.0
+    if not table.get("review_required"):
+        score += 5.0
+    if str(metadata.get("alignment_method") or "") == "title_exact":
+        score += 3.0
+    if str(metadata.get("alignment_method") or "") == "table_id":
+        score += 4.0
+    return score
+
+
+def _nutrition_alignment_record(table: dict[str, Any], status: str) -> dict[str, Any]:
+    metadata = _as_dict(table.get("metadata"))
+    return {
+        "status": status,
+        "table_id": table.get("table_id"),
+        "original_table_id": metadata.get("original_table_id"),
+        "aligned_standard_table_id": _nutrition_aligned_standard_table_id(table) or None,
+        "title": table.get("title"),
+        "row_count": len(_as_list(table.get("rows"))),
+        "source_ids": table.get("source_ids", []),
+        "alignment_method": metadata.get("alignment_method"),
+        "alignment_score": metadata.get("alignment_score"),
+    }
+
+
+def _nutrition_title_norm(title: str) -> str:
+    normalized = _evidence_norm(title)
+    normalized = normalized.replace("棕", "粽")
+    normalized = normalized.replace("营养成分表", "")
+    return normalized
 
 
 def _empty_structured_placeholder(item: dict[str, Any]) -> bool:
@@ -797,9 +1091,14 @@ def _build_evidence_chunks(
         if not items:
             continue
         chunks.append(_evidence_chunk(len(chunks) + 1, chunk_type, label, items, [], package_glm_blocks, package_ppocr_blocks))
-    tables = _as_list(artifacts.get("tables"))
-    if tables:
-        chunks.append(_evidence_chunk(len(chunks) + 1, "nutrition", "营养成分表", [], tables, package_glm_blocks, package_ppocr_blocks))
+    tables = _standard_nutrition_tables(artifacts)
+    if len(tables) <= 1:
+        if tables:
+            chunks.append(_evidence_chunk(len(chunks) + 1, "nutrition", "营养成分表", [], tables, package_glm_blocks, package_ppocr_blocks))
+    else:
+        for table in tables:
+            title = str(table.get("title") or "营养成分表")
+            chunks.append(_evidence_chunk(len(chunks) + 1, "nutrition", title, [], [table], package_glm_blocks, package_ppocr_blocks))
     if not chunks and (_as_list(package_glm_blocks.get("blocks")) or _as_list(package_ppocr_blocks.get("blocks"))):
         chunks.append(_evidence_chunk(1, "fallback", "全部文字", [], [], package_glm_blocks, package_ppocr_blocks))
     return chunks
@@ -836,8 +1135,15 @@ def _evidence_chunk(
     package_ppocr_blocks: dict[str, Any],
 ) -> dict[str, Any]:
     anchors = _chunk_anchors(standard_items, tables, chunk_type)
-    glm_blocks = [_compact_glm_block_for_llm(block) for block in _select_blocks(_as_list(package_glm_blocks.get("blocks")), anchors, 14)]
-    ppocr_blocks = [_compact_ppocr_block_for_llm(block) for block in _select_blocks(_as_list(package_ppocr_blocks.get("blocks")), anchors, 22)]
+    is_nutrition = chunk_type == "nutrition"
+    glm_blocks = [
+        _compact_glm_block_for_llm(block)
+        for block in _select_blocks(_as_list(package_glm_blocks.get("blocks")), anchors, 32 if is_nutrition else 14, prefer_tables=is_nutrition)
+    ]
+    ppocr_blocks = [
+        _compact_ppocr_block_for_llm(block)
+        for block in _select_blocks(_as_list(package_ppocr_blocks.get("blocks")), anchors, 32 if is_nutrition else 22, prefer_tables=False)
+    ]
     return {
         "chunk_id": stable_id("pkg_chunk", chunk_index),
         "chunk_type": chunk_type,
@@ -929,7 +1235,7 @@ def _dedupe_anchors(anchors: list[str]) -> list[str]:
     return output
 
 
-def _select_blocks(blocks: list[Any], anchors: list[str], limit: int) -> list[dict[str, Any]]:
+def _select_blocks(blocks: list[Any], anchors: list[str], limit: int, *, prefer_tables: bool = False) -> list[dict[str, Any]]:
     block_dicts = [_as_dict(block) for block in blocks]
     selected_indexes = set()
     for index, block in enumerate(block_dicts):
@@ -938,7 +1244,20 @@ def _select_blocks(blocks: list[Any], anchors: list[str], limit: int) -> list[di
     if not selected_indexes and block_dicts:
         selected_indexes.update(range(min(8, len(block_dicts))))
     selected = [block_dicts[index] for index in sorted(selected_indexes) if 0 <= index < len(block_dicts)]
+    if prefer_tables:
+        selected = sorted(selected, key=lambda block: _block_anchor_score(block, anchors), reverse=True)
     return selected[:limit]
+
+
+def _block_anchor_score(block: dict[str, Any], anchors: list[str]) -> float:
+    text = str(block.get("cleaned_text") or block.get("raw_text") or "")
+    norm_text = _evidence_norm(text)
+    score = 5.0 if _as_dict(block.get("table")) else 0.0
+    for anchor in anchors:
+        norm_anchor = _evidence_norm(anchor)
+        if len(norm_anchor) >= 2 and norm_anchor in norm_text:
+            score += min(len(norm_anchor), 12) / 12
+    return score
 
 
 def _text_matches_anchors(text: str, anchors: list[str]) -> bool:
@@ -1112,7 +1431,7 @@ def _normalize_structured_field(index: int, item: dict[str, Any], source_index: 
         return None, errors
     field = {
         "structured_item_id": stable_id("pkg_structured_field", index),
-        "semantic_key": str(item.get("semantic_key") or ""),
+        "semantic_key": _canonical_structured_field_semantic_key(str(item.get("semantic_key") or "")),
         "label": str(item.get("label") or item.get("semantic_key") or ""),
         "text": text,
         "source_ids": source_ids,
@@ -1130,6 +1449,48 @@ def _normalize_structured_field(index: int, item: dict[str, Any], source_index: 
         },
     }
     return field, errors
+
+
+def _canonical_structured_field_semantic_key(semantic_key: str) -> str:
+    return STRUCTURED_FIELD_SEMANTIC_KEY_ALIASES.get(semantic_key, semantic_key)
+
+
+def _dedupe_structured_fields(fields: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    best_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str]] = []
+    removed = 0
+    for field in fields:
+        field_dict = _as_dict(field)
+        key = _structured_field_duplicate_key(field_dict)
+        previous = best_by_key.get(key)
+        if previous is None:
+            best_by_key[key] = field_dict
+            order.append(key)
+            continue
+        removed += 1
+        if _structured_field_quality(field_dict) > _structured_field_quality(previous):
+            best_by_key[key] = field_dict
+    return [best_by_key[key] for key in order], removed
+
+
+def _structured_field_duplicate_key(field: dict[str, Any]) -> tuple[str, str, str, str]:
+    semantic_key = str(field.get("semantic_key") or "")
+    group_id = str(field.get("group_id") or "")
+    text = _evidence_norm(str(field.get("text") or ""))
+    source_ids = "|".join(sorted(str(source_id) for source_id in _as_list(field.get("source_ids"))))
+    if semantic_key == "custom.other_label_text":
+        return semantic_key, group_id, text, source_ids
+    return semantic_key, group_id, text, ""
+
+
+def _structured_field_quality(field: dict[str, Any]) -> tuple[int, float, int]:
+    review_score = 0 if field.get("review_required") else 1
+    try:
+        confidence = float(field.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    source_count = len(_as_list(field.get("source_ids")))
+    return review_score, confidence, source_count
 
 
 def _normalize_nutrition_table(index: int, table: dict[str, Any], source_index: dict[str, dict[str, Any]], errors: list[dict[str, Any]]) -> dict[str, Any]:

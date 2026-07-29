@@ -45,8 +45,46 @@ LONG_TEXT_SEMANTIC_ALIASES = {
         "custom.allergen_notice",
     },
 }
+STRUCTURED_SEMANTIC_ALIASES = {
+    "manufacturer.name": {
+        "manufacturer",
+        "producer",
+        "product.manufacturer",
+        "enterprise.manufacturer",
+        "enterprise.name",
+    },
+    "manufacturer.address": {
+        "manufacturer_address",
+        "producer.address",
+        "product.manufacturer_address",
+        "enterprise.address",
+    },
+    "manufacturer.license_number": {
+        "manufacturer_license_number",
+        "producer.license_number",
+        "product.manufacturer_license_number",
+        "enterprise.license_number",
+    },
+    "manufacturer.contact": {
+        "manufacturer_contact",
+        "producer.contact",
+        "product.manufacturer_contact",
+        "enterprise.contact",
+    },
+    "manufacturer.origin": {
+        "manufacturer_origin",
+        "producer.origin",
+        "product.manufacturer_origin",
+        "enterprise.origin",
+    },
+    "principal.name": {"principal", "consignor", "client", "enterprise.principal", "enterprise.name"},
+    "principal.address": {"principal_address", "consignor.address", "client.address", "enterprise.address"},
+    "distributor.name": {"distributor", "enterprise.distributor", "enterprise.name"},
+    "distributor.address": {"distributor_address", "enterprise.address"},
+}
 PREFIX_ALIASES_BY_SEMANTIC_KEY = {
     "product.name": ("产品名称", "品名"),
+    "product.product_type": ("产品类型", "产品类别", "产品分类", "类别"),
     "product.ingredients": ("配料", "配料表"),
     "content_item.ingredients": ("配料", "配料表", "配料原文"),
     "product.storage_condition": ("贮存条件", "储存条件", "保存条件"),
@@ -171,10 +209,13 @@ def build_standard_targets(artifacts: dict[str, Any]) -> list[dict[str, Any]]:
         if target:
             targets.append(target)
 
-    for table in _as_list(artifacts.get("tables")):
-        if not isinstance(table, dict) or table.get("table_type") != "nutrition_facts":
-            continue
-        targets.extend(_targets_from_nutrition_table(table, len(targets) + 1))
+    nutrition_tables = [
+        table
+        for table in _as_list(artifacts.get("tables"))
+        if isinstance(table, dict) and table.get("table_type") == "nutrition_facts"
+    ]
+    for table in nutrition_tables:
+        targets.extend(_targets_from_nutrition_table(table, len(targets) + 1, len(nutrition_tables)))
     return targets
 
 
@@ -387,18 +428,18 @@ def _target_from_standard_item(index: int, item: dict[str, Any]) -> dict[str, An
     }
 
 
-def _targets_from_nutrition_table(table: dict[str, Any], start_index: int) -> list[dict[str, Any]]:
+def _targets_from_nutrition_table(table: dict[str, Any], start_index: int, table_count: int) -> list[dict[str, Any]]:
     targets = []
     table_id = str(table.get("table_id") or "")
     title = str(table.get("title") or "营养成分表").strip()
     target_index = start_index
-    targets.append(_nutrition_target(target_index, "nutrition_title", table_id, "营养表标题", title, None))
+    targets.append(_nutrition_target(target_index, "nutrition_title", table_id, "营养表标题", title, None, table_count))
     target_index += 1
 
     columns = [column for column in _as_list(table.get("columns")) if isinstance(column, dict)]
     header_text = " ".join(str(column.get("name") or column.get("column_id") or "").strip() for column in columns if column)
     if header_text:
-        targets.append(_nutrition_target(target_index, "nutrition_header", table_id, "营养表表头", header_text, None))
+        targets.append(_nutrition_target(target_index, "nutrition_header", table_id, "营养表表头", header_text, None, table_count))
         target_index += 1
 
     column_names = {str(column.get("column_id")): str(column.get("name") or column.get("column_id") or "") for column in columns}
@@ -411,7 +452,7 @@ def _targets_from_nutrition_table(table: dict[str, Any], start_index: int) -> li
         expected_text = " ".join(value for value in cell_values if value)
         targets.append(
             {
-                **_nutrition_target(target_index, "nutrition_row", table_id, f"{title} - {row_key}", expected_text, row_key),
+                **_nutrition_target(target_index, "nutrition_row", table_id, f"{title} - {row_key}", expected_text, row_key, table_count),
                 "expected_parts": [
                     {
                         "column_id": str(cell.get("column_id") or ""),
@@ -427,12 +468,12 @@ def _targets_from_nutrition_table(table: dict[str, Any], start_index: int) -> li
     for footnote_index, footnote in enumerate(_as_list(table.get("footnotes")), start=1):
         text = str(footnote).strip()
         if text:
-            targets.append(_nutrition_target(target_index, "nutrition_footnote", table_id, f"{title} - 脚注 {footnote_index}", text, None))
+            targets.append(_nutrition_target(target_index, "nutrition_footnote", table_id, f"{title} - 脚注 {footnote_index}", text, None, table_count))
             target_index += 1
     return targets
 
 
-def _nutrition_target(index: int, target_type: str, table_id: str, label: str, expected_text: str, row_key: str | None) -> dict[str, Any]:
+def _nutrition_target(index: int, target_type: str, table_id: str, label: str, expected_text: str, row_key: str | None, table_count: int) -> dict[str, Any]:
     return {
         "target_id": stable_id("target", index),
         "target_type": target_type,
@@ -445,6 +486,7 @@ def _nutrition_target(index: int, target_type: str, table_id: str, label: str, e
         "group_id": None,
         "table_id": table_id,
         "row_key": row_key,
+        "standard_nutrition_table_count": table_count,
         "comparison_required": True,
         "review_required": False,
         "severity_if_missing": "critical",
@@ -625,6 +667,7 @@ def _build_table_regions(line_items: list[dict[str, Any]], tables: list[dict[str
             for candidate in line_items
             if x1 <= _line_center_x(candidate) <= x2 and y1 <= _line_center_y(candidate) <= y2
         ]
+        region_lines = _extend_table_region_with_adjacent_footnotes(region_lines, line_items, x1, x2)
         regions.append(
             {
                 "region_id": f"region_{matched_table.get('table_id')}",
@@ -659,6 +702,54 @@ def _table_region_x_bounds(title_line: dict[str, Any], title_lines: list[dict[st
     if index + 1 < len(same_band):
         x2 = (current_x + _line_center_x(same_band[index + 1])) / 2
     return max(0.0, x1), min(1.0, x2)
+
+
+def _extend_table_region_with_adjacent_footnotes(
+    region_lines: list[dict[str, Any]],
+    line_items: list[dict[str, Any]],
+    x1: float,
+    x2: float,
+) -> list[dict[str, Any]]:
+    if not region_lines:
+        return region_lines
+    region_ids = {str(line.get("ocr_line_id")) for line in region_lines}
+    bbox = _union_bbox([line.get("bbox_normalized") for line in region_lines]) or {}
+    table_bottom = float(bbox.get("y2", max(_line_center_y(line) for line in region_lines)))
+    x_tolerance = 0.025
+    y_limit = min(1.0, table_bottom + 0.05)
+    extras = []
+    for line in sorted(line_items, key=lambda item: (_line_center_y(item), _line_center_x(item))):
+        line_id = str(line.get("ocr_line_id") or "")
+        if line_id in region_ids:
+            continue
+        center_x = _line_center_x(line)
+        center_y = _line_center_y(line)
+        if not (x1 - x_tolerance <= center_x <= x2 + x_tolerance):
+            continue
+        if not (table_bottom <= center_y <= y_limit):
+            continue
+        if _looks_like_nutrition_footnote_line(line):
+            extras.append(line)
+            region_ids.add(line_id)
+    return sorted([*region_lines, *extras], key=lambda item: (_line_center_y(item), _line_center_x(item)))
+
+
+def _looks_like_nutrition_footnote_line(line: dict[str, Any]) -> bool:
+    text = normalize_compare_text(str(line.get("text") or ""))
+    if not text:
+        return False
+    if _is_nutrition_header_text(text):
+        return False
+    if re.match(r"^(能量|蛋白质|脂肪|碳水化合物|钠|糖)[:：]?", text):
+        return False
+    return bool(
+        text.startswith("*")
+        or "摄入" in text
+        or "儿童" in text
+        or "青少年" in text
+        or "营养素参考值" in text
+        or "参考值" in text
+    )
 
 
 def _build_candidate_pool(line_items: list[dict[str, Any]], layout: dict[str, Any]) -> list[CompareCandidate]:
@@ -747,7 +838,15 @@ def _compare_structured_target(target: dict[str, Any], structured_index: dict[st
 
     candidates = _structured_candidates_for_target(target, structured_index)
     if not candidates:
-        return _result(target, "critical_missing", "package_structured_item_not_found", None), []
+        reason = (
+            "nutrition_table_alignment_missing"
+            if _multi_nutrition_target(target) and not _has_nutrition_table_scope(target, structured_index)
+            else "package_structured_item_not_found"
+        )
+        result = _result(target, "critical_missing", reason, None)
+        if reason == "nutrition_table_alignment_missing":
+            result = _with_result_flag(result, "nutrition_cross_table_fallback_disabled")
+        return result, []
 
     expected_norm = _match_normalize_for_target(target, str(target.get("expected_text") or ""))
     long_text = _is_long_target(target)
@@ -795,6 +894,11 @@ def _compare_with_structured_preference(
     if target_type.startswith("nutrition_"):
         if structured_result.get("status") == "pass" and ppocr_result.get("status") != "pass":
             structured_result = _with_result_flag(structured_result, "ppocr_glm_table_conflict")
+        if target_type == "nutrition_footnote" and ppocr_result.get("status") == "pass" and structured_result.get("status") != "pass":
+            if structured_candidates:
+                ppocr_result = _with_result_flag(ppocr_result, "structured_footnote_scope_conflict")
+            ppocr_result = _with_result_flag(ppocr_result, "final_decision_by_rules")
+            return ppocr_result, target_candidates
         if structured_result.get("status") == "manual_review" and ppocr_result.get("status") == "pass":
             ppocr_result = _with_result_flag(ppocr_result, "llm_structured_item_review_required")
             ppocr_result = _with_result_flag(ppocr_result, "final_decision_by_rules")
@@ -869,9 +973,28 @@ def _structured_semantic_matches_target(target: dict[str, Any], metadata: dict[s
     candidate_key = str(metadata.get("semantic_key") or "")
     if candidate_key == semantic_key:
         return True
-    if not _is_long_target(target):
+    if candidate_key in _structured_semantic_aliases_for_target(target):
+        return True
+    return _structured_label_semantic_matches_target(target, metadata)
+
+
+def _structured_semantic_aliases_for_target(target: dict[str, Any]) -> set[str]:
+    semantic_key = str(target.get("semantic_key") or "")
+    aliases = set(STRUCTURED_SEMANTIC_ALIASES.get(semantic_key, set()))
+    if _is_long_target(target):
+        aliases.update(LONG_TEXT_SEMANTIC_ALIASES.get(semantic_key, set()))
+    return aliases
+
+
+def _structured_label_semantic_matches_target(target: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    label_norm = normalize_compare_text(str(metadata.get("label") or ""))
+    if not label_norm:
         return False
-    return candidate_key in LONG_TEXT_SEMANTIC_ALIASES.get(semantic_key, set())
+    aliases = _prefix_aliases_for_target(target)
+    if aliases and label_norm in aliases:
+        return True
+    expected_prefix = _expected_prefix(normalize_compare_text(str(target.get("expected_text") or "")))
+    return bool(expected_prefix and _canonical_prefix_for_target(target, label_norm) == _canonical_prefix_for_target(target, expected_prefix))
 
 
 def _structured_group_matches_target(target: dict[str, Any], metadata: dict[str, Any]) -> bool:
@@ -942,7 +1065,7 @@ def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: 
     candidates = []
     for table_index, table in enumerate(tables, start=1):
         table_dict = _as_dict(table)
-        if table_id and str(table_dict.get("table_id") or "") != table_id and not _allow_cross_id_nutrition_candidate(target, table_dict):
+        if table_id and not _nutrition_table_matches_target_scope(target, table_dict):
             continue
         table_source_ids = [str(line_id) for line_id in _as_list(table_dict.get("source_ocr_line_ids"))]
         if target_type == "nutrition_title":
@@ -961,11 +1084,35 @@ def _structured_nutrition_candidates_for_target(target: dict[str, Any], tables: 
         elif target_type == "nutrition_footnote":
             for footnote_index, footnote in enumerate(_as_list(table_dict.get("footnotes")), start=1):
                 footnote_dict = _as_dict(footnote)
-                candidates.append(_structured_text_candidate(64000 + table_index * 100 + footnote_index, "package_structured_nutrition_footnote", str(footnote_dict.get("text") or ""), [str(line_id) for line_id in _as_list(footnote_dict.get("source_ocr_line_ids"))], footnote_dict, table_id, footnote_dict))
+                footnote_metadata = {
+                    **footnote_dict,
+                    "_parent_table_bbox": table_dict.get("bbox_normalized"),
+                    "_parent_table_source_ocr_line_ids": table_source_ids,
+                }
+                candidates.append(
+                    _structured_text_candidate(
+                        64000 + table_index * 100 + footnote_index,
+                        "package_structured_nutrition_footnote",
+                        str(footnote_dict.get("text") or ""),
+                        [str(line_id) for line_id in _as_list(footnote_dict.get("source_ocr_line_ids"))],
+                        footnote_dict,
+                        table_id,
+                        footnote_metadata,
+                    )
+                )
     return candidates
 
 
+def _has_nutrition_table_scope(target: dict[str, Any], structured_index: dict[str, Any]) -> bool:
+    return any(
+        _nutrition_table_matches_target_scope(target, _as_dict(table))
+        for table in _as_list(structured_index.get("nutrition_tables"))
+    )
+
+
 def _allow_cross_id_nutrition_candidate(target: dict[str, Any], table: dict[str, Any]) -> bool:
+    if _multi_nutrition_target(target):
+        return False
     if str(target.get("target_type") or "") != "nutrition_row":
         return False
     row_key = _nutrition_row_key_match_text(str(target.get("row_key") or ""))
@@ -973,6 +1120,26 @@ def _allow_cross_id_nutrition_candidate(target: dict[str, Any], table: dict[str,
         row_key in _nutrition_row_match_keys(_as_dict(row))
         for row in _as_list(table.get("rows"))
     )
+
+
+def _nutrition_table_matches_target_scope(target: dict[str, Any], table: dict[str, Any]) -> bool:
+    table_id = str(target.get("table_id") or "")
+    if not table_id:
+        return True
+    metadata = _as_dict(table.get("metadata"))
+    aligned_id = str(table.get("aligned_standard_table_id") or metadata.get("aligned_standard_table_id") or "")
+    if aligned_id == table_id:
+        return True
+    if str(table.get("table_id") or "") == table_id:
+        return True
+    return _allow_cross_id_nutrition_candidate(target, table)
+
+
+def _multi_nutrition_target(target: dict[str, Any]) -> bool:
+    try:
+        return int(target.get("standard_nutrition_table_count") or 0) > 1
+    except (TypeError, ValueError):
+        return False
 
 
 def _nutrition_column_text(column: Any) -> str:
@@ -1035,7 +1202,11 @@ def _structured_text_candidate(
         f"region_{table_id}" if table_id else None,
         {
             "table_id": table_id,
+            "candidate_table_id": metadata_source.get("table_id"),
+            "aligned_standard_table_id": metadata_source.get("aligned_standard_table_id") or _as_dict(metadata_source.get("metadata")).get("aligned_standard_table_id"),
             "source_ids": metadata_source.get("source_ids", []),
+            "parent_table_bbox": metadata_source.get("_parent_table_bbox"),
+            "parent_table_source_ocr_line_ids": metadata_source.get("_parent_table_source_ocr_line_ids", []),
             "confidence": metadata_source.get("confidence"),
             "review_required": bool(metadata_source.get("review_required")),
         },
@@ -1045,6 +1216,8 @@ def _structured_text_candidate(
 def _structured_candidate_requires_review(candidate: CompareCandidate) -> bool:
     metadata = _as_dict(candidate.metadata)
     if candidate.candidate_type != "package_structured_field":
+        if candidate.candidate_type == "package_structured_nutrition_footnote" and not _structured_nutrition_footnote_in_table_scope(candidate):
+            return True
         return bool(metadata.get("review_required"))
     if not candidate.source_ocr_line_ids:
         return True
@@ -1069,6 +1242,22 @@ def _structured_candidate_requires_review(candidate: CompareCandidate) -> bool:
     else:
         low_confidence = min(confidence_values) < threshold
     return bool(metadata.get("review_required")) or low_confidence
+
+
+def _structured_nutrition_footnote_in_table_scope(candidate: CompareCandidate) -> bool:
+    metadata = _as_dict(candidate.metadata)
+    table_bbox = _as_dict(metadata.get("parent_table_bbox"))
+    candidate_bbox = _as_dict(candidate.bbox_normalized)
+    if not table_bbox or not candidate_bbox:
+        return True
+    candidate_center_x = (float(candidate_bbox.get("x1", 0)) + float(candidate_bbox.get("x2", 0))) / 2
+    candidate_y1 = float(candidate_bbox.get("y1", 0))
+    table_height = max(0.0, float(table_bbox.get("y2", 0)) - float(table_bbox.get("y1", 0)))
+    x1 = max(0.0, float(table_bbox.get("x1", 0)) - 0.05)
+    x2 = min(1.0, float(table_bbox.get("x2", 1)) + 0.05)
+    y1 = max(0.0, float(table_bbox.get("y1", 0)) - 0.01)
+    y2 = min(1.0, float(table_bbox.get("y2", 1)) + max(0.05, table_height * 0.25))
+    return x1 <= candidate_center_x <= x2 and y1 <= candidate_y1 <= y2
 
 
 def _split_line_candidates(line: dict[str, Any], start_index: int) -> list[CompareCandidate]:
@@ -1848,6 +2037,8 @@ def _match_normalize_for_target(target: dict[str, Any], text: str) -> str:
     prefix, value = _prefix_parts(normalized)
     if prefix:
         prefix = _canonical_prefix_for_target(target, prefix)
+    elif _target_allows_label_supplied_prefix(target):
+        prefix = _label_prefix_for_target(target)
     value = _strip_terminal_field_punctuation(value)
     if _allows_separator_insensitive_match(target):
         value = _strip_long_text_separators(value)
@@ -1903,6 +2094,25 @@ def _prefix_aliases_for_target(target: dict[str, Any]) -> tuple[str, ...]:
     return tuple(normalized_aliases)
 
 
+def _target_allows_label_supplied_prefix(target: dict[str, Any]) -> bool:
+    if str(target.get("target_type") or "") != "field":
+        return False
+    expected_raw = normalize_compare_text(str(target.get("expected_text") or ""))
+    if _expected_prefix(expected_raw):
+        return False
+    return bool(_label_prefix_for_target(target))
+
+
+def _label_prefix_for_target(target: dict[str, Any]) -> str:
+    label = normalize_compare_text(str(target.get("label") or ""))
+    if not label:
+        return ""
+    aliases = _prefix_aliases_for_target(target)
+    if aliases and label in aliases:
+        return aliases[0]
+    return ""
+
+
 def _candidate_text_for_match(target: dict[str, Any], candidate: CompareCandidate) -> str:
     if candidate.candidate_type != "package_structured_field":
         return candidate.text
@@ -1951,11 +2161,10 @@ def _candidate_normalization_flags(target: dict[str, Any], candidate: CompareCan
     expected_prefix_match, _ = _prefix_parts(_match_normalize_for_target(target, str(target.get("expected_text") or "")))
     candidate_prefix_match, _ = _prefix_parts(_match_normalize_for_target(target, _candidate_text_for_match(target, candidate)))
     if (
-        expected_prefix_raw
-        and candidate_prefix_raw
-        and expected_prefix_raw != candidate_prefix_raw
+        (expected_prefix_raw or candidate_prefix_raw)
         and expected_prefix_match
         and expected_prefix_match == candidate_prefix_match
+        and expected_prefix_raw != candidate_prefix_raw
     ):
         flags.append("prefix_normalized_match")
 
@@ -2115,6 +2324,9 @@ def _match_quality_flags(target: dict[str, Any], status: str, reason: str, candi
         flags.append("final_decision_by_rules")
         if "nutrition" in candidate.candidate_type:
             flags.append("glm_structured_table_match")
+            metadata = _as_dict(candidate.metadata)
+            if str(metadata.get("aligned_standard_table_id") or "") == str(target.get("table_id") or ""):
+                flags.append("nutrition_table_aligned")
         elif candidate.candidate_type == "package_structured_field" and status == "pass":
             provider = str(_as_dict(candidate.metadata).get("source_provider") or "")
             if provider == "ppocr":
@@ -2141,6 +2353,8 @@ def _match_quality_flags(target: dict[str, Any], status: str, reason: str, candi
         flags.append("candidate_found_text_differs")
     if status == "critical_missing":
         flags.append("no_reliable_candidate")
+    if reason == "nutrition_table_alignment_missing":
+        flags.append("nutrition_table_alignment_missing")
     if reason in {"barcode_decoder_unavailable", "barcode_not_decoded"}:
         flags.append(reason)
     return flags

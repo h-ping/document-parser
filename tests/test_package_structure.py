@@ -10,6 +10,7 @@ from document_parser.llm import LlmClient, LlmError
 from document_parser.models import BBoxNormalized, OcrLine
 from document_parser.package_structure import (
     PACKAGE_STRUCTURE_LLM_MAX_TOKENS,
+    build_package_llm_structure_input,
     build_package_glm_blocks,
     build_package_ppocr_blocks,
     normalize_package_structure_output,
@@ -394,6 +395,180 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["selected_candidate"]["text"], "蛋白质 20.0克 33%")
         self.assertEqual(result["selected_candidate"]["source_ocr_line_ids"], ["glm_table"])
+
+    def test_multi_nutrition_chunks_are_split_by_standard_table(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                _standard_nutrition_table("nutrition_n1", "人参乌鸡靓汤粽营养成分表", "810千焦"),
+                _standard_nutrition_table("nutrition_n2", "椰子鸡靓汤粽营养成分表", "820千焦"),
+            ],
+        }
+        glm_blocks = build_package_glm_blocks(
+            [
+                _glm_line(
+                    "glm_1",
+                    "block_1",
+                    1,
+                    "table",
+                    "人参乌鸡靓汤粽营养成分表<table><tr><td>项目</td><td>每100克</td><td>营养素参考值%</td></tr><tr><td>能量</td><td>810千焦</td><td>10%</td></tr></table>",
+                    0.1,
+                    0.1,
+                    0.4,
+                    0.3,
+                ),
+                _glm_line(
+                    "glm_2",
+                    "block_2",
+                    2,
+                    "table",
+                    "椰子鸡靓汤粽营养成分表<table><tr><td>项目</td><td>每100克</td><td>营养素参考值%</td></tr><tr><td>能量</td><td>820千焦</td><td>10%</td></tr></table>",
+                    0.5,
+                    0.1,
+                    0.8,
+                    0.3,
+                ),
+            ]
+        )
+
+        structure_input = build_package_llm_structure_input(artifacts, glm_blocks, build_package_ppocr_blocks([]))
+
+        nutrition_chunks = [chunk for chunk in structure_input["evidence_chunks"] if chunk["chunk_type"] == "nutrition"]
+        self.assertEqual(len(nutrition_chunks), 2)
+        self.assertEqual([chunk["tables"][0]["table_id"] for chunk in nutrition_chunks], ["nutrition_n1", "nutrition_n2"])
+        self.assertTrue(any("人参乌鸡靓汤粽" in block["cleaned_text"] for block in nutrition_chunks[0]["glm_blocks"]))
+        self.assertTrue(any("椰子鸡靓汤粽" in block["cleaned_text"] for block in nutrition_chunks[1]["glm_blocks"]))
+
+    def test_normalize_dedupes_and_aligns_repeated_nutrition_tables(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                _standard_nutrition_table("nutrition_n1", "人参乌鸡靓汤粽营养成分表", "810千焦"),
+                _standard_nutrition_table("nutrition_n2", "椰子鸡靓汤粽营养成分表", "820千焦"),
+            ],
+        }
+        blocks = build_package_glm_blocks(
+            [
+                _glm_line("glm_1", "block_1", 1, "table", "人参乌鸡靓汤棕营养成分表 能量 810千焦 10%", 0.1, 0.1, 0.4, 0.3),
+                _glm_line("glm_2", "block_2", 2, "table", "椰子鸡靓汤粽营养成分表 能量 820千焦 10%", 0.5, 0.1, 0.8, 0.3),
+            ]
+        )
+
+        structured, quality = normalize_package_structure_output(
+            {
+                "fields": [],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [
+                    _package_nutrition_table("nutrition_001", "人参乌鸡靓汤棕营养成分表", "810千焦", "glm:block_1"),
+                    _package_nutrition_table("nt_1", "人参乌鸡靓汤粽营养成分表", "810千焦", "glm:block_1"),
+                    _package_nutrition_table("nutrition_002", "椰子鸡靓汤粽营养成分表", "820千焦", "glm:block_2"),
+                ],
+                "other_text": [],
+                "warnings": [],
+            },
+            blocks,
+            artifacts,
+        )
+
+        self.assertEqual(quality["status"], "pass")
+        self.assertEqual(quality["nutrition_table_count"], 2)
+        self.assertEqual([table["table_id"] for table in structured["nutrition_tables"]], ["nutrition_n1", "nutrition_n2"])
+        self.assertEqual(
+            [table["metadata"]["aligned_standard_table_id"] for table in structured["nutrition_tables"]],
+            ["nutrition_n1", "nutrition_n2"],
+        )
+        self.assertEqual(structured["nutrition_table_alignment"]["duplicate_removed_count"], 1)
+
+    def test_multi_nutrition_tables_do_not_cross_match_unaligned_rows(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                _standard_nutrition_table("nutrition_n1", "表A营养成分表", "100千焦"),
+                _standard_nutrition_table("nutrition_n2", "表B营养成分表", "200千焦"),
+            ],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [],
+            "nutrition_tables": [
+                {
+                    **_package_nutrition_table("nutrition_n1", "表A营养成分表", "100千焦", "glm_table_a"),
+                    "metadata": {"aligned_standard_table_id": "nutrition_n1", "source_provider": "glm"},
+                },
+                _package_nutrition_table("pkg_table_b", "表B营养成分表", "200千焦", "glm_table_b"),
+            ],
+        }
+
+        results = compare_standard_to_ocr(
+            artifacts,
+            [],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="nutrition",
+        )["comparison_result"]["results"]
+
+        n1_row = _result_for(results, target_type="nutrition_row", table_id="nutrition_n1", row_key="能量")
+        n2_row = _result_for(results, target_type="nutrition_row", table_id="nutrition_n2", row_key="能量")
+        self.assertEqual(n1_row["status"], "pass")
+        self.assertEqual(n2_row["status"], "critical_missing")
+        self.assertIn("nutrition_table_alignment_missing", n2_row["match_quality_flags"])
+
+    def test_glm_fallback_recovers_neighbor_titles_for_multiple_nutrition_tables(self) -> None:
+        artifacts = {
+            "standard_items": [],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                _standard_nutrition_table("nutrition_n1", "人参乌鸡靓汤粽营养成分表", "810千焦"),
+                _standard_nutrition_table("nutrition_n2", "椰子鸡靓汤粽营养成分表", "820千焦"),
+            ],
+        }
+        glm_lines = [
+            _glm_line("title_1", "title_block_1", 1, "text", "人参乌鸡靓汤粽营养成分表", 0.1, 0.1, 0.3, 0.12),
+            _glm_line(
+                "table_1",
+                "table_block_1",
+                2,
+                "table",
+                "<table><tr><td>项目</td><td>每100克</td><td>营养素参考值%</td></tr><tr><td>能量</td><td>810千焦</td><td>10%</td></tr></table>",
+                0.1,
+                0.13,
+                0.3,
+                0.3,
+            ),
+            _glm_line("title_2", "title_block_2", 3, "text", "椰子鸡靓汤粽营养成分表", 0.5, 0.1, 0.7, 0.12),
+            _glm_line(
+                "table_2",
+                "table_block_2",
+                4,
+                "table",
+                "<table><tr><td>项目</td><td>每100克</td><td>营养素参考值%</td></tr><tr><td>能量</td><td>820千焦</td><td>10%</td></tr></table>",
+                0.5,
+                0.13,
+                0.7,
+                0.3,
+            ),
+        ]
+
+        run = run_package_structure_stage(
+            artifacts=artifacts,
+            ppocr_lines=[],
+            glm_lines=glm_lines,
+            llm_mode="disabled",
+            llm_client=None,
+        )
+
+        alignment = run.package_structured_items["nutrition_table_alignment"]
+        self.assertEqual(alignment["alignment_missing_count"], 0)
+        self.assertEqual([table["table_id"] for table in run.package_structured_items["nutrition_tables"]], ["nutrition_n1", "nutrition_n2"])
+        self.assertEqual([table["aligned_standard_table_id"] for table in alignment["package_tables"]], ["nutrition_n1", "nutrition_n2"])
 
     def test_nutrition_matching_uses_first_cell_when_row_key_is_generic(self) -> None:
         artifacts = {
@@ -820,6 +995,53 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(field["metadata"]["source_provider"], "ppocr")
         self.assertFalse(field["review_required"])
 
+    def test_normalize_canonicalizes_and_dedupes_product_type_alias_fields(self) -> None:
+        blocks = build_package_ppocr_blocks([
+            _ppocr_line("pp_1", "产品类型：混合胶型", 0.1, 0.1, 0.4, 0.12)
+        ])
+
+        structured, quality = normalize_package_structure_output(
+            {
+                "fields": [
+                    {
+                        "semantic_key": "product.product_type",
+                        "label": "产品类型",
+                        "text": "产品类型：混合胶型",
+                        "source_ids": ["pp:line_pp_1"],
+                        "confidence": 0.95,
+                        "review_required": False,
+                    },
+                    {
+                        "semantic_key": "product_type",
+                        "label": "产品类型",
+                        "text": "产品类型：混合胶型",
+                        "source_ids": ["pp:line_pp_1"],
+                        "confidence": 0.94,
+                        "review_required": False,
+                    },
+                    {
+                        "semantic_key": "custom.product_type",
+                        "label": "产品类型",
+                        "text": "产品类型：混合胶型",
+                        "source_ids": ["pp:line_pp_1"],
+                        "confidence": 0.93,
+                        "review_required": False,
+                    },
+                ],
+                "field_groups": [],
+                "content_items": [],
+                "nutrition_tables": [],
+                "other_text": [],
+                "warnings": [],
+            },
+            {"glm_blocks": build_package_glm_blocks([]), "ppocr_blocks": blocks},
+        )
+
+        self.assertEqual(quality["status"], "pass")
+        self.assertEqual(quality["field_count"], 1)
+        self.assertEqual(quality["structured_field_duplicate_removed_count"], 2)
+        self.assertEqual(structured["fields"][0]["semantic_key"], "product.product_type")
+
     def test_normalize_ignores_empty_structured_placeholders(self) -> None:
         structured, quality = normalize_package_structure_output(
             {
@@ -904,6 +1126,104 @@ class PackageStructureTests(unittest.TestCase):
         self.assertEqual(result["reason"], "package_structured_text_match")
         self.assertEqual(result["selected_candidate"]["text"], "保质期：12个月")
         self.assertIn("ppocr_glm_field_conflict", result["match_quality_flags"])
+
+    def test_structured_enterprise_field_alias_can_match_target_semantic_key(self) -> None:
+        standard_item = _standard_item("std_1", "manufacturer.name", "生产者", "生产者：东莞徐记食品有限公司")
+        standard_item["group_id"] = "manufacturer_e2"
+        artifacts = {
+            "standard_items": [standard_item],
+            "field_groups": [],
+            "lists": [],
+            "tables": [],
+        }
+        structured = _structured_field(
+            "product.manufacturer",
+            "生产者",
+            "生产者：东莞徐记食品有限公司",
+            "pp_1",
+            "manufacturer_e2",
+        )
+        structured["metadata"] = {"source_provider": "ppocr"}
+        package_structure = {
+            "enabled": True,
+            "fields": [structured],
+            "nutrition_tables": [],
+        }
+
+        result = compare_standard_to_ocr(
+            artifacts,
+            [
+                _ppocr_line("pp_1", "生产者：东莞徐记食品有限", 0.1, 0.1, 0.4, 0.12),
+            ],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["selected_candidate"]["candidate_type"], "package_structured_field")
+        self.assertEqual(result["selected_candidate"]["text"], "生产者：东莞徐记食品有限公司")
+
+    def test_nutrition_footnote_uses_adjacent_table_scope_when_structured_text_is_cross_category_duplicate(self) -> None:
+        artifacts = {
+            "standard_items": [
+                _standard_item("std_note", "custom.other_label_text", "果汁说明", "*100%果汁指总果汁含量以原果汁计≥100%")
+            ],
+            "field_groups": [],
+            "lists": [],
+            "tables": [
+                {
+                    **_standard_nutrition_table("nutrition_n1", "营养成分表", "1390千焦"),
+                    "footnotes": ["儿童青少年应避免过量摄入盐油糖。"],
+                }
+            ],
+        }
+        package_structure = {
+            "enabled": True,
+            "fields": [
+                _structured_field(
+                    "custom.other_label_text",
+                    "果汁说明",
+                    "*100%果汁指总果汁含量以原果汁计≥100%",
+                    "pp_note",
+                )
+            ],
+            "nutrition_tables": [
+                {
+                    **_package_nutrition_table("pkg_n1", "营养成分表", "1390千焦", "pp_table"),
+                    "aligned_standard_table_id": "nutrition_n1",
+                    "bbox_normalized": {"x1": 0.1, "y1": 0.43, "x2": 0.4, "y2": 0.63},
+                    "footnotes": [
+                        {
+                            "text": "*100%果汁指总果汁含量以原果汁计≥100%",
+                            "source_ocr_line_ids": ["pp_note"],
+                            "bbox_normalized": {"x1": 0.05, "y1": 0.2, "x2": 0.5, "y2": 0.22},
+                            "confidence": 0.99,
+                            "review_required": False,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        results = compare_standard_to_ocr(
+            artifacts,
+            [
+                _ppocr_line("pp_note", "*100%果汁指总果汁含量以原果汁计≥100%", 0.05, 0.2, 0.5, 0.22),
+                _ppocr_line("pp_table", "营养成分表", 0.1, 0.43, 0.4, 0.45),
+                _ppocr_line("pp_header", "项目 每100克 营养素参考值%", 0.1, 0.47, 0.4, 0.49),
+                _ppocr_line("pp_energy", "能量 1390千焦 10%", 0.1, 0.61, 0.4, 0.63),
+                _ppocr_line("pp_footnote", "儿童青少年应避免过量摄入盐油糖。", 0.1, 0.665, 0.4, 0.685),
+            ],
+            PACKAGE_IMAGE,
+            package_structure=package_structure,
+            package_structure_scope="all",
+        )["comparison_result"]["results"]
+
+        footnote = _result_for(results, target_type="nutrition_footnote", table_id="nutrition_n1")
+        self.assertEqual(footnote["status"], "pass")
+        self.assertEqual(footnote["selected_candidate"]["text"], "儿童青少年应避免过量摄入盐油糖。")
+        self.assertNotEqual(footnote["selected_candidate"]["text"], "*100%果汁指总果汁含量以原果汁计≥100%")
 
     def test_llm_error_still_enables_glm_nutrition_table_fallback(self) -> None:
         artifacts = {
@@ -1174,6 +1494,55 @@ def _structured_field(semantic_key: str, label: str, text: str, line_id: str, gr
         "source_ocr_line_ids": [line_id],
         "bbox_normalized": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.12},
         "group_id": group_id,
+        "confidence": 0.99,
+        "review_required": False,
+    }
+
+
+def _standard_nutrition_table(table_id: str, title: str, energy: str) -> dict:
+    return {
+        "table_id": table_id,
+        "table_type": "nutrition_facts",
+        "title": title,
+        "columns": [
+            {"column_id": "item", "name": "项目"},
+            {"column_id": "amount", "name": "每100克"},
+            {"column_id": "nrv", "name": "营养素参考值%"},
+        ],
+        "rows": [
+            {
+                "row_key": "能量",
+                "cells": [
+                    {"column_id": "item", "raw_value": "能量"},
+                    {"column_id": "amount", "raw_value": energy},
+                    {"column_id": "nrv", "raw_value": "10%"},
+                ],
+            }
+        ],
+        "footnotes": [],
+    }
+
+
+def _package_nutrition_table(table_id: str, title: str, energy: str, source_id: str) -> dict:
+    return {
+        "table_id": table_id,
+        "title": title,
+        "source_ids": [source_id],
+        "source_ocr_line_ids": [source_id],
+        "bbox_normalized": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.3},
+        "columns": ["项目", "每100克", "营养素参考值%"],
+        "rows": [
+            {
+                "row_key": "能量",
+                "cells": ["能量", energy, "10%"],
+                "source_ids": [source_id],
+                "source_ocr_line_ids": [source_id],
+                "bbox_normalized": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.3},
+                "confidence": 0.99,
+                "review_required": False,
+            }
+        ],
+        "footnotes": [],
         "confidence": 0.99,
         "review_required": False,
     }

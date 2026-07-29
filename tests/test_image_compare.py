@@ -103,6 +103,20 @@ class ImageCompareTests(unittest.TestCase):
         self.assertIn("prefix_normalized_match", result["match_quality_flags"])
         self.assertIn("punctuation_insensitive_match", result["match_quality_flags"])
 
+    def test_field_match_allows_candidate_prefix_when_standard_value_uses_field_label(self) -> None:
+        artifacts = {
+            "standard_items": [_standard_item("std_0001", "product.product_type", "产品类型", "混合胶型")],
+            "tables": [],
+            "field_groups": [],
+            "lists": [],
+        }
+        lines = [_ocr_line("ocr_0001", "产品类型：混合胶型", 0.1, 0.1, 0.35, 0.12)]
+
+        result = compare_standard_to_ocr(artifacts, lines, PACKAGE_IMAGE)["comparison_result"]["results"][0]
+
+        self.assertEqual(result["status"], "pass")
+        self.assertIn("prefix_normalized_match", result["match_quality_flags"])
+
     def test_long_text_match_ignores_separator_differences_with_prefix_alias(self) -> None:
         artifacts = {
             "standard_items": [
